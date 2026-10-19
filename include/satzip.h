@@ -11,6 +11,12 @@
 #else
   #define SZ_HAVE_AVX2 0
 #endif
+#if !SZ_HAVE_AVX2 && (defined(__SSE2__) || defined(_M_X64) || defined(_M_AMD64))
+  #include <emmintrin.h>
+  #define SZ_HAVE_SSE2 1
+#else
+  #define SZ_HAVE_SSE2 0
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,6 +83,14 @@ SZ_INLINE size_t sz_match_len(const uint8_t* a, const uint8_t* b, const uint8_t*
         if (neq) return (size_t)(a - a0) + sz_ctz32(neq);
         a += 32; b += 32;
     }
+#elif SZ_HAVE_SSE2
+    while (SZ_LIKELY(a + 16 <= a_limit)) {
+        __m128i va = _mm_loadu_si128((const __m128i*)a);
+        __m128i vb = _mm_loadu_si128((const __m128i*)b);
+        uint32_t neq = ~(uint32_t)_mm_movemask_epi8(_mm_cmpeq_epi8(va, vb)) & 0xFFFFu;
+        if (neq) return (size_t)(a - a0) + sz_ctz32(neq);
+        a += 16; b += 16;
+    }
 #endif
     while (a + 8 <= a_limit) {
         uint64_t x = sz_load64(a) ^ sz_load64(b);
@@ -92,6 +106,11 @@ SZ_INLINE void sz_wildcopy(uint8_t* d, const uint8_t* s, uint8_t* d_end) {
     do {
         _mm256_storeu_si256((__m256i*)d, _mm256_loadu_si256((const __m256i*)s));
         d += 32; s += 32;
+    } while (d < d_end);
+#elif SZ_HAVE_SSE2
+    do {
+        _mm_storeu_si128((__m128i*)d, _mm_loadu_si128((const __m128i*)s));
+        d += 16; s += 16;
     } while (d < d_end);
 #else
     do { memcpy(d, s, 8); d += 8; s += 8; } while (d < d_end);
@@ -109,6 +128,8 @@ size_t sz_compress_block_r(sz_state_t* st, const uint8_t* in, size_t in_len, uin
 
 size_t sz_decompress_block(const uint8_t* src, size_t src_len,
                            uint8_t* dst, size_t dst_capacity);
+
+const char* sz_cpu_path(void);
 
 #ifdef __cplusplus
 }

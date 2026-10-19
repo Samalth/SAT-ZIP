@@ -11,6 +11,7 @@
 #include "satzip_7z_write.hpp"
 #include "satzip_tar.hpp"
 #include "satzip_xz.hpp"
+#include "satzip_version.h"
 
 #include <cstdio>
 #include <cstring>
@@ -28,7 +29,7 @@ static int cmd_compress(const char* in, const char* out) {
     std::vector<uint8_t> obuf(sz_stream_bound(n, 16));
     sz_state_t st{}; sz_state_reset(&st);
     size_t c = sz_stream_compress(&st, data.data(), n, obuf.data(), obuf.size(), 16, SZ_ACCEL_MAX, SZ_MODE_R);
-    if (!c || !write_file(out, obuf.data(), c)) { std::fprintf(stderr, "satzip: compress failed\n"); return 1; }
+    if (!c || !write_file_atomic(out, obuf.data(), c)) { std::fprintf(stderr, "satzip: compress failed\n"); return 1; }
     std::printf("compressed %ju -> %zu bytes (x%.2f)\n", (uintmax_t)n, c, n ? (double)n / c : 0);
     return 0;
 }
@@ -67,7 +68,7 @@ static int cmd_add(const char* archive, int npaths, char** paths) {
 #endif
     if (ext == ".tar") total = build_tar(items, out);
     else total = build_archive(items, out, SZ_ACCEL_MAX, 0, false, SZ_MODE_R);
-    if (!total || !write_file(archive, out.data(), total)) {
+    if (!total || !write_file_atomic(archive, out.data(), total)) {
         std::fprintf(stderr, "satzip: archive failed\n"); return 1;
     }
     size_t files = 0; uintmax_t raw = 0;
@@ -185,7 +186,7 @@ static int cmd_list(const char* archive) {
         std::printf("%12s %12s  %s\n", "orig", "stored", "name");
         uint64_t to = 0, ts = 0;
         for (auto& z : zes) {
-            if (z.is_dir) { std::printf("%12s %12s  %s\n", "-", "-", z.name.c_str()); continue; }
+            if (z.is_dir) { std::printf("%12s %12s  %s/\n", "-", "-", z.name.c_str()); continue; }
             std::printf("%12ju %12ju  %s\n", (uintmax_t)z.orig, (uintmax_t)z.stored, z.name.c_str());
             to += z.orig; ts += z.stored;
         }
@@ -313,18 +314,21 @@ static int win_register(bool) {
 
 static int usage() {
     std::fprintf(stderr,
-        "SAT-ZIP\n"
+        "SAT-ZIP %s (codec: %s)\n"
         "  satzip a <archive> <paths...>  create an archive from files/folders\n"
         "  satzip x <archive> [destdir]   extract an archive\n"
         "  satzip l <archive>             list archive contents\n"
         "  satzip c <in> <out>            compress a single file (.satz stream)\n"
         "  satzip d <in> <out>            decompress a single .satz stream\n"
         "  satzip --register              install Windows Explorer integration (per-user)\n"
-        "  satzip --unregister            remove it\n");
+        "  satzip --unregister            remove it\n", SATZIP_VERSION, sz_cpu_path());
     return 2;
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+#endif
     if (argc < 2) return usage();
     std::string cmd = argv[1];
     if (cmd == "a")            return argc >= 4 ? cmd_add(argv[2], argc - 3, argv + 3) : usage();

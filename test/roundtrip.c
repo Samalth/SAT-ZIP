@@ -173,7 +173,7 @@ int main(void) {
         }
 
         size_t bound = SZ_AR_HEADER + SZ_AR_END + SZ_MARGIN;
-        for (int i = 0; i < 5; ++i) { bound += SZ_AR_DIR_FIXED + strlen(names[i]);
+        for (int i = 0; i < 5; ++i) { bound += SZ_AR_DIR_BOUND + strlen(names[i]);
                                       if (!isdir[i]) bound += sz_stream_bound(fsize[i], 16); }
         uint8_t* arc = (uint8_t*)malloc(bound);
 

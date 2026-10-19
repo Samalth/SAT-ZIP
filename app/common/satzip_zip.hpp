@@ -9,6 +9,10 @@ namespace sz {
 
 struct ZipEntry { std::string name; bool is_dir; uint64_t orig, stored; uint32_t idx; };
 
+inline std::string zip_name(const mz_zip_archive_file_stat& st) {
+    return legacy_to_utf8(st.m_filename, !(st.m_bit_flag & 0x800));
+}
+
 inline bool is_zip_file(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
     char m[4] = {0};
@@ -30,11 +34,20 @@ inline bool zip_list(const fs::path& p, std::vector<ZipEntry>& out) {
     for (mz_uint i = 0; i < cnt; ++i) {
         mz_zip_archive_file_stat st;
         if (!mz_zip_reader_file_stat(&za, i, &st)) { mz_zip_reader_end(&za); return false; }
-        out.push_back({ st.m_filename, mz_zip_reader_is_file_a_directory(&za, i) != 0,
-                        (uint64_t)st.m_uncomp_size, (uint64_t)st.m_comp_size, (uint32_t)i });
+        bool dir = mz_zip_reader_is_file_a_directory(&za, i) != 0;
+        std::string name = zip_name(st);
+        if (dir && !name.empty() && name.back() == '/') name.pop_back();
+        out.push_back({ name, dir, (uint64_t)st.m_uncomp_size, (uint64_t)st.m_comp_size, (uint32_t)i });
     }
     mz_zip_reader_end(&za);
     return true;
+}
+
+inline std::string zip_time_extra(int64_t mtime) {
+    if (mtime == SZ_AR_NO_MTIME) return {};
+    uint32_t t = (uint32_t)(mtime / 1000000000);
+    const char x[9] = { 0x55, 0x54, 5, 0, 1, (char)t, (char)(t >> 8), (char)(t >> 16), (char)(t >> 24) };
+    return std::string(x, 9);
 }
 
 struct ZipBlob { std::vector<uint8_t> deflated; std::vector<uint8_t> raw; uint32_t crc = 0; uint64_t orig = 0; bool store = false; };
@@ -78,15 +91,21 @@ inline size_t build_zip(const std::vector<Item>& items, std::vector<uint8_t>& ou
     for (size_t i = 0; i < items.size() && ok; ++i) {
         const Item& it = items[i];
         ZipBlob& b = blobs[i];
+        MZ_TIME_T t = (MZ_TIME_T)(it.mtime / 1000000000);
+        MZ_TIME_T* tp = it.mtime != SZ_AR_NO_MTIME ? &t : nullptr;
+        std::string ex = zip_time_extra(it.mtime);
+        mz_uint exn = (mz_uint)ex.size();
         if (it.is_dir) {
             std::string d = it.name + "/";
-            ok = mz_zip_writer_add_mem(&za, d.c_str(), nullptr, 0, 0) != 0;
+            ok = mz_zip_writer_add_mem_ex_v2(&za, d.c_str(), nullptr, 0, nullptr, 0, 0, 0, 0, tp,
+                                             ex.data(), exn, ex.data(), exn) != 0;
         } else if (b.store) {
-            ok = mz_zip_writer_add_mem(&za, it.name.c_str(), b.raw.data(), b.raw.size(), 0) != 0;
+            ok = mz_zip_writer_add_mem_ex_v2(&za, it.name.c_str(), b.raw.data(), b.raw.size(), nullptr, 0, 0, 0, 0,
+                                             tp, ex.data(), exn, ex.data(), exn) != 0;
         } else {
-            ok = mz_zip_writer_add_mem_ex(&za, it.name.c_str(), b.deflated.data(), b.deflated.size(),
-                                          nullptr, 0, (mz_uint)level | MZ_ZIP_FLAG_COMPRESSED_DATA,
-                                          b.orig, b.crc) != 0;
+            ok = mz_zip_writer_add_mem_ex_v2(&za, it.name.c_str(), b.deflated.data(), b.deflated.size(),
+                                             nullptr, 0, (mz_uint)level | MZ_ZIP_FLAG_COMPRESSED_DATA,
+                                             b.orig, b.crc, tp, ex.data(), exn, ex.data(), exn) != 0;
         }
         b.deflated.clear(); b.deflated.shrink_to_fit();
         b.raw.clear(); b.raw.shrink_to_fit();
@@ -123,6 +142,7 @@ inline int zip_extract(const fs::path& p, const fs::path& dest, const std::vecto
     std::atomic<int> files{0}, bad{0};
     std::atomic<size_t> done{0};
     std::mutex fmtx;
+    std::vector<std::pair<fs::path, int64_t>> dir_times;
     const void* key = buf.data();
     size_t klen = buf.size();
 
@@ -141,19 +161,22 @@ inline int zip_extract(const fs::path& p, const fs::path& dest, const std::vecto
             uint32_t i = idx[k];
             mz_zip_archive_file_stat st;
             if (mz_zip_reader_file_stat(&tza, i, &st)) {
-                fname = st.m_filename;
-                fs::path rel = fs::path(st.m_filename).lexically_normal();
+                fname = zip_name(st);
+                fs::path rel = fs::path(fname).lexically_normal();
                 if (safe_rel(rel)) {
                     fs::path dst = dest / rel;
+                    int64_t mt = (int64_t)st.m_time * 1000000000;
                     if (mz_zip_reader_is_file_a_directory(&tza, i)) {
                         fs::create_directories(dst, ec);
+                        std::lock_guard<std::mutex> lk(fmtx);
+                        dir_times.push_back({ dst, mt });
                         ok = true;
                     } else {
                         fs::create_directories(dst.parent_path(), ec);
                         size_t usz = (size_t)st.m_uncomp_size;
                         std::vector<uint8_t> data(usz);
                         bool got = usz == 0 || mz_zip_reader_extract_to_mem(&tza, i, data.data(), usz, 0) != 0;
-                        if (got && write_file(dst, data.data(), usz)) { files.fetch_add(1); ok = true; }
+                        if (got && write_file(dst, data.data(), usz)) { restore_mtime(dst, mt); files.fetch_add(1); ok = true; }
                     }
                 }
             }
@@ -165,6 +188,7 @@ inline int zip_extract(const fs::path& p, const fs::path& dest, const std::vecto
         if (progress) progress(done.fetch_add(1) + 1, idx.size());
     }, cancel);
 
+    for (auto& d : dir_times) restore_mtime(d.first, d.second);
     if (failures) *failures = bad.load();
     return files.load();
 }

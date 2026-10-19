@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cctype>
+#include <cstdio>
 #include <vector>
 #include <string>
 #include <functional>
@@ -14,13 +15,48 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <chrono>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 namespace sz {
 namespace fs = std::filesystem;
 
 using Progress = std::function<void(size_t done, size_t total)>;
 
-struct Item { fs::path abs; std::string name; bool is_dir; uintmax_t size; };
+struct Item { fs::path abs; std::string name; bool is_dir; uintmax_t size; int64_t mtime = SZ_AR_NO_MTIME; };
+
+inline int64_t to_unix_ns(fs::file_time_type t) {
+#if defined(_MSC_VER)
+    return ((int64_t)t.time_since_epoch().count() - 116444736000000000LL) * 100;
+#else
+    auto sys = std::chrono::system_clock::now() + (t - fs::file_time_type::clock::now());
+    return (int64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(sys.time_since_epoch()).count();
+#endif
+}
+
+inline fs::file_time_type from_unix_ns(int64_t ns) {
+#if defined(_MSC_VER)
+    return fs::file_time_type(fs::file_time_type::duration(ns / 100 + 116444736000000000LL));
+#else
+    auto sys = std::chrono::system_clock::time_point(
+        std::chrono::duration_cast<std::chrono::system_clock::duration>(std::chrono::nanoseconds(ns)));
+    return fs::file_time_type::clock::now() + (sys - std::chrono::system_clock::now());
+#endif
+}
+
+inline int64_t file_mtime(const fs::path& p) {
+    std::error_code ec;
+    auto t = fs::last_write_time(p, ec);
+    return ec ? SZ_AR_NO_MTIME : to_unix_ns(t);
+}
+
+inline void restore_mtime(const fs::path& p, int64_t ns) {
+    if (ns == SZ_AR_NO_MTIME) return;
+    std::error_code ec;
+    fs::last_write_time(p, from_unix_ns(ns), ec);
+}
 
 inline std::vector<uint8_t> read_file(const fs::path& p, size_t real, size_t pad) {
     std::vector<uint8_t> buf(real + pad);
@@ -36,21 +72,46 @@ inline bool write_file(const fs::path& p, const uint8_t* d, size_t n) {
     return (bool)f;
 }
 
+inline bool write_file_atomic(const fs::path& p, const uint8_t* d, size_t n) {
+    fs::path tmp = p;
+    tmp += ".sztmp";
+#ifdef _WIN32
+    FILE* f = _wfopen(tmp.c_str(), L"wbc");
+#else
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+#endif
+    if (!f) return false;
+    bool ok = (n == 0 || std::fwrite(d, 1, n, f) == n) && std::fflush(f) == 0;
+#ifndef _WIN32
+    ok = ok && fsync(fileno(f)) == 0;
+#endif
+    ok = std::fclose(f) == 0 && ok;
+    std::error_code ec;
+    if (ok) { fs::rename(tmp, p, ec); ok = !ec; }
+    if (!ok) fs::remove(tmp, ec);
+    return ok;
+}
+
 inline void gather(const fs::path& input, std::vector<Item>& out) {
     std::error_code ec;
-    if (fs::is_directory(input, ec)) {
-        fs::path base = input.parent_path();
-        out.push_back({input, fs::relative(input, base).generic_string(), true, 0});
-        for (auto it = fs::recursive_directory_iterator(input,
+    fs::path root = fs::absolute(input, ec).lexically_normal();
+    if (!root.has_filename() && root.has_relative_path()) root = root.parent_path();
+    if (fs::is_directory(root, ec)) {
+        fs::path base = root.parent_path();
+        out.push_back({root, root.lexically_relative(base).generic_string(), true, 0, file_mtime(root)});
+        for (auto it = fs::recursive_directory_iterator(root,
                  fs::directory_options::skip_permission_denied, ec);
              !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
             const fs::path& p = it->path();
             bool dir = it->is_directory(ec);
             uintmax_t s = dir ? 0 : it->file_size(ec);
-            out.push_back({p, fs::relative(p, base).generic_string(), dir, ec ? 0 : s});
+            if (ec) s = 0;
+            auto t = it->last_write_time(ec);
+            out.push_back({p, p.lexically_relative(base).generic_string(), dir, s,
+                           ec ? SZ_AR_NO_MTIME : to_unix_ns(t)});
         }
     } else {
-        out.push_back({input, input.filename().generic_string(), false, fs::file_size(input, ec)});
+        out.push_back({root, root.filename().generic_string(), false, fs::file_size(root, ec), file_mtime(root)});
     }
 }
 
@@ -131,7 +192,7 @@ inline size_t build_archive(const std::vector<Item>& items, std::vector<uint8_t>
 
     size_t bound = SZ_AR_HEADER + SZ_AR_END + SZ_MARGIN;
     for (size_t i = 0; i < N; ++i)
-        bound += SZ_AR_DIR_FIXED + items[i].name.size() + blobs[i].payload.size();
+        bound += SZ_AR_DIR_BOUND + items[i].name.size() + blobs[i].payload.size();
     out.assign(bound, 0);
 
     sz_archive_writer w;
@@ -141,6 +202,7 @@ inline size_t build_archive(const std::vector<Item>& items, std::vector<uint8_t>
         if (it.is_dir) sz_aw_add_blob(&w, it.name.c_str(), 1, 0, 0, 0, nullptr, 0);
         else sz_aw_add_blob(&w, it.name.c_str(), 0, blobs[i].method, blobs[i].crc,
                             blobs[i].orig, blobs[i].payload.data(), blobs[i].payload.size());
+        sz_aw_set_mtime(&w, it.mtime);
     }
     size_t n = sz_aw_finish(&w);
     out.resize(n);
@@ -155,6 +217,31 @@ struct Archive {
     ~Archive() { close(); }
 };
 
+inline std::string legacy_to_utf8(const std::string& s, bool oem) {
+#ifdef _WIN32
+    if (s.empty() || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), (int)s.size(), nullptr, 0))
+        return s;
+    auto system_cp = [](LCTYPE type) {
+        DWORD cp = 0;
+        return GetLocaleInfoEx(LOCALE_NAME_SYSTEM_DEFAULT, type | LOCALE_RETURN_NUMBER,
+                               (LPWSTR)&cp, sizeof(cp) / sizeof(WCHAR)) && cp ? (UINT)cp : 0u;
+    };
+    static const UINT oem_cp  = system_cp(LOCALE_IDEFAULTCODEPAGE);
+    static const UINT ansi_cp = system_cp(LOCALE_IDEFAULTANSICODEPAGE);
+    UINT cp = oem ? (oem_cp ? oem_cp : 437u) : (ansi_cp ? ansi_cp : 1252u);
+    int wn = MultiByteToWideChar(cp, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w((size_t)wn, L'\0');
+    MultiByteToWideChar(cp, 0, s.data(), (int)s.size(), &w[0], wn);
+    int un = WideCharToMultiByte(CP_UTF8, 0, w.data(), wn, nullptr, 0, nullptr, nullptr);
+    std::string out((size_t)un, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), wn, &out[0], un, nullptr, nullptr);
+    return out;
+#else
+    (void)oem;
+    return s;
+#endif
+}
+
 inline bool open_archive(const fs::path& p, Archive& a) {
     std::error_code ec;
     auto sz = fs::file_size(p, ec);
@@ -163,6 +250,15 @@ inline bool open_archive(const fs::path& p, Archive& a) {
     a.buf = read_file(p, sz, 0);
     if (sz_ar_open(a.buf.data(), a.buf.size(), &a.entries, &a.count) != 0) {
         a.entries = nullptr; a.count = 0; return false;
+    }
+    for (uint32_t i = 0; i < a.count; ++i) {
+        std::string fixed = legacy_to_utf8(a.entries[i].name, false);
+        if (fixed == a.entries[i].name) continue;
+        char* n = (char*)malloc(fixed.size() + 1);
+        if (!n) continue;
+        memcpy(n, fixed.c_str(), fixed.size() + 1);
+        free(a.entries[i].name);
+        a.entries[i].name = n;
     }
     return true;
 }
@@ -204,7 +300,7 @@ inline int extract(const Archive& a, const fs::path& destdir, const std::vector<
                 std::vector<uint8_t> obuf((size_t)e.orig_size + SZ_MARGIN);
                 size_t d = sz_ar_extract(a.buf.data(), a.buf.size(), &e, obuf.data(), (size_t)e.orig_size);
                 if (d == SZ_ERR || !write_file(dst, obuf.data(), d)) fail(e.name);
-                else files.fetch_add(1);
+                else { restore_mtime(dst, e.mtime); files.fetch_add(1); }
             }
         } else {
             fail(e.name);
@@ -212,6 +308,11 @@ inline int extract(const Archive& a, const fs::path& destdir, const std::vector<
         if (progress) progress(done.fetch_add(1) + 1, total);
     }, cancel);
 
+    for (uint32_t i : idx) {
+        const sz_ar_entry& e = a.entries[i];
+        fs::path rel = fs::path(e.name).lexically_normal();
+        if (e.is_dir && safe_rel(rel)) restore_mtime(destdir / rel, e.mtime);
+    }
     if (failures) *failures = bad.load();
     return files.load();
 }

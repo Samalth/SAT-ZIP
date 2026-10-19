@@ -23,7 +23,8 @@ inline void u32le(std::vector<uint8_t>& out, uint32_t v) {
 
 }
 
-inline size_t xz_compress(const uint8_t* src, size_t n, std::vector<uint8_t>& out, int level) {
+inline size_t xz_compress(const uint8_t* src, size_t n, std::vector<uint8_t>& out, int level,
+                          const Progress& progress = {}, const std::atomic<bool>* cancel = nullptr) {
     using namespace xz;
     if (level < 1) level = 1;
     if (level > 9) level = 9;
@@ -39,7 +40,8 @@ inline size_t xz_compress(const uint8_t* src, size_t n, std::vector<uint8_t>& ou
 
     std::vector<uint8_t> packed(n + n / 2 + 4096);
     size_t packedLen = packed.size();
-    SRes r = Lzma2Enc_Encode2(enc, nullptr, packed.data(), &packedLen, nullptr, src, n, nullptr);
+    sevenz::EncProgress ep{ { sevenz::enc_progress }, &progress, cancel, n };
+    SRes r = Lzma2Enc_Encode2(enc, nullptr, packed.data(), &packedLen, nullptr, src, n, &ep.vt);
     Lzma2Enc_Destroy(enc);
     if (r != SZ_OK) return 0;
     packed.resize(packedLen);
@@ -96,10 +98,12 @@ inline size_t xz_compress(const uint8_t* src, size_t n, std::vector<uint8_t>& ou
 }
 
 inline size_t build_tar_xz(const std::vector<Item>& items, std::vector<uint8_t>& out,
-                           int level, const Progress& progress = {}) {
+                           int level, const Progress& progress = {},
+                           const std::atomic<bool>* cancel = nullptr) {
     std::vector<uint8_t> tarball;
-    if (!build_tar(items, tarball, progress)) return 0;
-    return xz_compress(tarball.data(), tarball.size(), out, level);
+    if (!build_tar(items, tarball)) return 0;
+    if (cancel && *cancel) return 0;
+    return xz_compress(tarball.data(), tarball.size(), out, level, progress, cancel);
 }
 
 inline bool is_xz_data(const uint8_t* p, size_t n) {

@@ -31,15 +31,19 @@ typedef struct {
     uint16_t name_len;
     uint32_t crc;
     uint64_t orig, stored, offset;
+    int64_t  mtime;
     char*    name;
 } aw_entry;
+
+#define AR_DIR_FIXED_V1 32
+#define AR_TAG_MTIME    1
 
 int sz_aw_init(sz_archive_writer* w, uint8_t* out, size_t out_cap) {
     if (out_cap < SZ_AR_HEADER + SZ_AR_END) return -1;
     w->out = out; w->cap = out_cap; w->cur = SZ_AR_HEADER;
     w->ents = NULL; w->count = 0; w->ecap = 0; w->error = 0;
     out[0]='S'; out[1]='Z'; out[2]='A'; out[3]='R';
-    out[4]=1; out[5]=0; out[6]=0; out[7]=0;
+    out[4]=2; out[5]=0; out[6]=0; out[7]=0;
     return 0;
 }
 
@@ -63,6 +67,7 @@ static aw_entry* aw_begin(sz_archive_writer* w, const char* name) {
     memcpy(e->name, name, nlen + 1);
     e->name_len = (uint16_t)nlen;
     e->offset   = w->cur;
+    e->mtime    = SZ_AR_NO_MTIME;
     return e;
 }
 
@@ -111,6 +116,12 @@ int sz_aw_add_blob(sz_archive_writer* w, const char* name, int is_dir,
     return 0;
 }
 
+int sz_aw_set_mtime(sz_archive_writer* w, int64_t mtime_ns) {
+    if (w->error || w->count == 0) return -1;
+    ((aw_entry*)w->ents)[w->count - 1].mtime = mtime_ns;
+    return 0;
+}
+
 size_t sz_aw_finish(sz_archive_writer* w) {
     size_t total = 0;
     if (!w->error) {
@@ -118,7 +129,8 @@ size_t sz_aw_finish(sz_archive_writer* w) {
         uint64_t dir_off = w->cur;
         for (uint32_t i = 0; i < w->count && !w->error; ++i) {
             aw_entry* e = &ents[i];
-            if (w->cur + SZ_AR_DIR_FIXED + e->name_len > w->cap) { w->error = 1; break; }
+            uint16_t extra_len = e->mtime != SZ_AR_NO_MTIME ? 12 : 0;
+            if (w->cur + SZ_AR_DIR_FIXED + e->name_len + extra_len > w->cap) { w->error = 1; break; }
             uint8_t* p = w->out + w->cur;
             p[0] = e->type; p[1] = e->method;
             wr16(p + 2, e->name_len);
@@ -126,8 +138,16 @@ size_t sz_aw_finish(sz_archive_writer* w) {
             wr64(p + 8,  e->orig);
             wr64(p + 16, e->stored);
             wr64(p + 24, e->offset);
+            wr16(p + 32, extra_len);
+            wr16(p + 34, 0);
             memcpy(p + SZ_AR_DIR_FIXED, e->name, e->name_len);
-            w->cur += SZ_AR_DIR_FIXED + e->name_len;
+            if (extra_len) {
+                uint8_t* x = p + SZ_AR_DIR_FIXED + e->name_len;
+                wr16(x, AR_TAG_MTIME);
+                wr16(x + 2, 8);
+                wr64(x + 4, (uint64_t)e->mtime);
+            }
+            w->cur += SZ_AR_DIR_FIXED + e->name_len + extra_len;
         }
         if (!w->error && w->cur + SZ_AR_END <= w->cap) {
             uint8_t* p = w->out + w->cur;
@@ -151,7 +171,8 @@ size_t sz_aw_finish(sz_archive_writer* w) {
 
 int sz_ar_open(const uint8_t* arc, size_t n, sz_ar_entry** out_entries, uint32_t* out_count) {
     if (n < SZ_AR_HEADER + SZ_AR_END) return -1;
-    if (!(arc[0]=='S'&&arc[1]=='Z'&&arc[2]=='A'&&arc[3]=='R') || arc[4] != 1) return -1;
+    if (!(arc[0]=='S'&&arc[1]=='Z'&&arc[2]=='A'&&arc[3]=='R') || (arc[4] != 1 && arc[4] != 2)) return -1;
+    size_t fixed = arc[4] == 1 ? AR_DIR_FIXED_V1 : SZ_AR_DIR_FIXED;
 
     const uint8_t* end = arc + n - SZ_AR_END;
     if (!(end[12]=='S'&&end[13]=='Z'&&end[14]=='E'&&end[15]=='D')) return -1;
@@ -165,23 +186,34 @@ int sz_ar_open(const uint8_t* arc, size_t n, sz_ar_entry** out_entries, uint32_t
     const uint8_t* p   = arc + dir_off;
     const uint8_t* lim = arc + n - SZ_AR_END;
     for (uint32_t i = 0; i < count; ++i) {
-        if (p + SZ_AR_DIR_FIXED > lim) { sz_ar_close(es, i); return -1; }
+        if (p + fixed > lim) { sz_ar_close(es, i); return -1; }
         uint16_t nlen = rd16(p + 2);
-        if (p + SZ_AR_DIR_FIXED + nlen > lim) { sz_ar_close(es, i); return -1; }
+        uint16_t xlen = fixed == SZ_AR_DIR_FIXED ? rd16(p + 32) : 0;
+        if (fixed == SZ_AR_DIR_FIXED && rd16(p + 34) != 0) { sz_ar_close(es, i); return -1; }
+        if (p + fixed + nlen + xlen > lim) { sz_ar_close(es, i); return -1; }
         es[i].is_dir      = p[0] == SZ_AR_DIR;
         es[i].method      = p[1];
         es[i].crc         = rd32(p + 4);
         es[i].orig_size   = rd64(p + 8);
         es[i].stored_size = rd64(p + 16);
         es[i].offset      = rd64(p + 24);
+        es[i].mtime       = SZ_AR_NO_MTIME;
         es[i].name = (char*)malloc((size_t)nlen + 1);
         if (!es[i].name) { sz_ar_close(es, i); return -1; }
-        memcpy(es[i].name, p + SZ_AR_DIR_FIXED, nlen);
+        memcpy(es[i].name, p + fixed, nlen);
         es[i].name[nlen] = 0;
+        const uint8_t* x    = p + fixed + nlen;
+        const uint8_t* xend = x + xlen;
+        while (x + 4 <= xend) {
+            uint16_t tag = rd16(x), len = rd16(x + 2);
+            if (x + 4 + len > xend) { sz_ar_close(es, i + 1); return -1; }
+            if (tag == AR_TAG_MTIME && len == 8) es[i].mtime = (int64_t)rd64(x + 4);
+            x += 4 + len;
+        }
         if (!es[i].is_dir) {
             if (es[i].offset + es[i].stored_size > dir_off) { sz_ar_close(es, i + 1); return -1; }
         }
-        p += SZ_AR_DIR_FIXED + nlen;
+        p += fixed + nlen + xlen;
     }
     *out_entries = es; *out_count = count;
     return 0;

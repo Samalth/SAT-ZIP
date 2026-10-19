@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(satzip VERSION 0.5.0 LANGUAGES C)   # <-- single source of truth for the version
+project(satzip VERSION 0.6.0 LANGUAGES C)   # <-- ssot for version
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -15,19 +15,63 @@ configure_file(${CMAKE_CURRENT_SOURCE_DIR}/include/satzip_version.h.in
 if(WIN32)
     enable_language(RC)
     set(SATZIP_WIN_RC ${CMAKE_CURRENT_SOURCE_DIR}/assets/satzip.rc)
+    if(MSVC)
+        set(SATZIP_WIN_MANIFEST ${CMAKE_CURRENT_SOURCE_DIR}/assets/satzip.manifest)
+    endif()
 endif()
 
-add_library(satzip STATIC src/satzip_encode.c src/satzip_encode_r.c src/satzip_decode.c src/satzip_tans.c src/satzip_split.c src/satzip_stream.c src/satzip_archive.c)
+if(MSVC)
+    set(SATZIP_OPT /O2 /Oi /Gy)
+    set(SATZIP_AVX2_OPT /arch:AVX2)
+else()
+    set(SATZIP_OPT -O3 -funroll-loops -fno-semantic-interposition -fomit-frame-pointer)
+    set(SATZIP_AVX2_OPT -mavx2 -mbmi -mbmi2 -mfma)
+endif()
+
+set(SATZIP_HOT_SOURCES src/satzip_encode.c src/satzip_encode_r.c src/satzip_decode.c)
+if(CMAKE_C_COMPILER_ARCHITECTURE_ID)
+    string(TOLOWER "${CMAKE_C_COMPILER_ARCHITECTURE_ID}" _sz_cpu)
+else()
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _sz_cpu)
+endif()
+if(_sz_cpu MATCHES "^(amd64|x86_64|x64)$")
+    set(SATZIP_DISPATCH_AVX2 ON)
+endif()
+
+add_library(satzip_hot_base OBJECT ${SATZIP_HOT_SOURCES})
+target_compile_definitions(satzip_hot_base PRIVATE
+    sz_compress_block=sz_compress_block_base
+    sz_compress_block_r=sz_compress_block_r_base
+    sz_decompress_block=sz_decompress_block_base)
+target_compile_options(satzip_hot_base PRIVATE ${SATZIP_OPT})
+set(SATZIP_HOT_OBJECTS $<TARGET_OBJECTS:satzip_hot_base>)
+set(SATZIP_HOT_TARGETS satzip_hot_base)
+
+if(SATZIP_DISPATCH_AVX2)
+    add_library(satzip_hot_avx2 OBJECT ${SATZIP_HOT_SOURCES})
+    target_compile_definitions(satzip_hot_avx2 PRIVATE
+        sz_compress_block=sz_compress_block_avx2
+        sz_compress_block_r=sz_compress_block_r_avx2
+        sz_decompress_block=sz_decompress_block_avx2)
+    target_compile_options(satzip_hot_avx2 PRIVATE ${SATZIP_OPT} ${SATZIP_AVX2_OPT})
+    list(APPEND SATZIP_HOT_OBJECTS $<TARGET_OBJECTS:satzip_hot_avx2>)
+    list(APPEND SATZIP_HOT_TARGETS satzip_hot_avx2)
+endif()
+
+foreach(_t ${SATZIP_HOT_TARGETS})
+    target_include_directories(${_t} PRIVATE include ${CMAKE_BINARY_DIR}/generated)
+endforeach()
+
+add_library(satzip STATIC src/satzip_dispatch.c src/satzip_tans.c src/satzip_split.c src/satzip_stream.c
+                          src/satzip_archive.c ${SATZIP_HOT_OBJECTS})
 target_include_directories(satzip PUBLIC include ${CMAKE_BINARY_DIR}/generated)
+if(SATZIP_DISPATCH_AVX2)
+    target_compile_definitions(satzip PRIVATE SATZIP_DISPATCH_AVX2=1)
+endif()
 
 add_library(satzip_bench STATIC src/satzip_bench.c)
 target_link_libraries(satzip_bench PUBLIC satzip)
 
-if(MSVC)
-    set(SATZIP_OPT /O2 /arch:AVX2 /Oi /Gy)
-else()
-    set(SATZIP_OPT -O3 -march=native -funroll-loops -fno-semantic-interposition -fomit-frame-pointer)
-endif()
 target_compile_options(satzip       PRIVATE ${SATZIP_OPT})
 target_compile_options(satzip_bench PRIVATE ${SATZIP_OPT})
 
@@ -82,7 +126,7 @@ if(SATZIP_WITH_ZIP)
     endif()
 endif()
 
-add_executable(satzip_cli app/cli/satzip.cpp ${SATZIP_WIN_RC})
+add_executable(satzip_cli app/cli/satzip.cpp ${SATZIP_WIN_RC} ${SATZIP_WIN_MANIFEST})
 set_target_properties(satzip_cli PROPERTIES OUTPUT_NAME satzip)
 target_include_directories(satzip_cli PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/common)
 target_link_libraries(satzip_cli PRIVATE satzip Threads::Threads)
@@ -157,7 +201,8 @@ if(SATZIP_BUILD_GUI)
         ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
         ${implot_SOURCE_DIR}/implot.cpp
         ${implot_SOURCE_DIR}/implot_items.cpp
-        ${SATZIP_WIN_RC})
+        ${SATZIP_WIN_RC} ${SATZIP_WIN_MANIFEST})
+    target_compile_definitions(satzip_gui PRIVATE IMGUI_USE_WCHAR32)
     target_include_directories(satzip_gui PRIVATE
         ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends ${implot_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/app/common)
@@ -181,9 +226,10 @@ if(SATZIP_BUILD_GUI)
 
      if(WIN32)
         set_target_properties(satzip_gui PROPERTIES WIN32_EXECUTABLE TRUE)
-        target_link_libraries(satzip_gui PRIVATE comdlg32 shell32 ole32 windowsapp)  # dialogs + WinRT share
+        target_link_libraries(satzip_gui PRIVATE comdlg32 comctl32 shell32 ole32 windowsapp)  # dialogs + WinRT share
         if(MSVC)
             target_link_options(satzip_gui PRIVATE /ENTRY:mainCRTStartup)
+            target_compile_definitions(satzip_gui PRIVATE _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
         endif()
     endif()
 

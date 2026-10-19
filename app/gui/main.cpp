@@ -5,6 +5,7 @@
   #include <commdlg.h>
   #include <shlobj.h>
   #include <shellapi.h>
+  #include <commctrl.h>
 #endif
 
 #include "satzip_bench.h"
@@ -31,6 +32,7 @@
 #endif
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "implot.h"
 #include "imgui_impl_glfw.h"
 #include "imgui_impl_opengl3.h"
@@ -55,6 +57,67 @@ namespace fs = std::filesystem;
 
 static ImFont* g_font_bold = nullptr;
 static bool    g_icons = false;
+
+static std::mutex           g_glyph_mtx;
+static std::vector<bool>    g_glyph_seen(IM_UNICODE_CODEPOINT_MAX + 1);
+static std::vector<ImWchar> g_glyph_extra;
+static std::atomic<bool>    g_glyph_dirty{false};
+
+static bool glyph_in_base(unsigned c) {
+    return c < 0x0250 || (c >= 0x0370 && c < 0x0530) || (c >= 0x2000 && c < 0x2070) || (c >= 0xE700 && c <= 0xE900);
+}
+
+static void want_glyphs(const std::string& s) {
+    const char* p = s.c_str();
+    const char* e = p + s.size();
+    std::lock_guard<std::mutex> lk(g_glyph_mtx);
+    while (p < e) {
+        unsigned c = 0;
+        int n = ImTextCharFromUtf8(&c, p, e);
+        if (n <= 0) break;
+        p += n;
+        if (glyph_in_base(c) || c > IM_UNICODE_CODEPOINT_MAX || g_glyph_seen[c]) continue;
+        g_glyph_seen[c] = true;
+        g_glyph_extra.push_back((ImWchar)c);
+        g_glyph_dirty = true;
+    }
+}
+
+static void load_fonts() {
+#ifdef _WIN32
+    ImGuiIO& io = ImGui::GetIO();
+    static ImVector<ImWchar> ranges;
+    static const ImWchar base_ranges[] = { 0x0020, 0x024F, 0x0370, 0x052F, 0x2000, 0x206F, 0 };
+    static const ImWchar icon_range[] = { 0xE700, 0xE900, 0 };
+    static const char* fallbacks[] = { "msyh.ttc", "malgun.ttf", "LeelawUI.ttf", "Nirmala.ttc", "seguisym.ttf", "seguiemj.ttf" };
+    ImFontGlyphRangesBuilder rb;
+    rb.AddRanges(base_ranges);
+    bool extra = false;
+    { std::lock_guard<std::mutex> lk(g_glyph_mtx);
+      for (ImWchar c : g_glyph_extra) rb.AddChar(c);
+      extra = !g_glyph_extra.empty(); }
+    ranges.clear();
+    rb.BuildRanges(&ranges);
+    auto add = [&](const char* file, float px, bool merge, const ImWchar* rg, ImVec2 off, float min_adv) -> ImFont* {
+        fs::path f = fs::path("C:\\Windows\\Fonts") / file;
+        if (!fs::exists(f)) return nullptr;
+        ImFontConfig cfg;
+        cfg.MergeMode = merge;
+        cfg.GlyphOffset = off;
+        cfg.GlyphMinAdvanceX = min_adv;
+        return io.Fonts->AddFontFromFileTTF(f.string().c_str(), px, &cfg, rg);
+    };
+    auto add_fallbacks = [&] { if (extra) for (const char* fb : fallbacks) add(fb, 18.0f, true, ranges.Data, ImVec2(0, 0), 0.0f); };
+    if (add("segoeui.ttf", 18.0f, false, ranges.Data, ImVec2(0, 0), 0.0f)) {
+        add_fallbacks();
+        g_icons = add("segmdl2.ttf", 15.0f, true, icon_range, ImVec2(0, 2), 18.0f) != nullptr;
+    }
+    g_font_bold = add("segoeuib.ttf", 18.0f, false, ranges.Data, ImVec2(0, 0), 0.0f);
+    if (g_font_bold) add_fallbacks();
+    io.Fonts->Build();
+    io.Fonts->ClearInputData();
+#endif
+}
 
 #define SZ_ICON_MAIL   "\xEE\x9C\x95"
 #define SZ_ICON_FILTER "\xEE\x9C\x9C"
@@ -144,16 +207,20 @@ static void open_in_explorer(const fs::path& p) {
 #endif
 }
 
-static void set_window_icon(GLFWwindow* win) {
 #ifdef _WIN32
-    HWND hwnd = glfwGetWin32Window(win);
-    if (!hwnd) return;
+static void set_hwnd_icon(HWND hwnd) {
     wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
     HICON hBig = nullptr, hSmall = nullptr;
     if (ExtractIconExW(exe, 0, &hBig, &hSmall, 1)) {
         if (hBig)   SendMessageW(hwnd, WM_SETICON, ICON_BIG,   (LPARAM)hBig);
         if (hSmall) SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hSmall);
     }
+}
+#endif
+
+static void set_window_icon(GLFWwindow* win) {
+#ifdef _WIN32
+    if (HWND hwnd = glfwGetWin32Window(win)) set_hwnd_icon(hwnd);
 #else
     (void)win;
 #endif
@@ -296,6 +363,7 @@ static bool load_archive_into(App* a, const std::string& path) {
         kind = AKind::Satz; ok = true;
     }
 
+    for (const auto& v : ve) want_glyphs(v.name);
     { std::lock_guard<std::mutex> lk(a->mtx);
       if (ok) {
           a->opened.close();
@@ -342,6 +410,7 @@ static void stage_paths(App* a, const std::vector<std::string>& paths) {
     std::lock_guard<std::mutex> lk(a->mtx);
     if (a->mode != Mode::Building) { a->staged.clear(); a->suggest_name.clear(); a->mode = Mode::Building; }
     for (const auto& s : paths) sz::gather(fs::path(s), a->staged);
+    for (const auto& it : a->staged) want_glyphs(it.name);
     if (a->suggest_name.empty() && !paths.empty()) {
         fs::path first(paths[0]);
         a->suggest_name = first.stem().string();
@@ -369,8 +438,8 @@ static void do_create(App* a, std::string outpath) {
     else
 #endif
 #if defined(SATZIP_HAVE_7Z)
-    if (ext == ".7z") n = sz::sevenz_write(items, out, level, prog);
-    else if (ext == ".xz") n = sz::build_tar_xz(items, out, level, prog);
+    if (ext == ".7z") n = sz::sevenz_write(items, out, level, prog, &a->cancel);
+    else if (ext == ".xz") n = sz::build_tar_xz(items, out, level, prog, &a->cancel);
     else
 #endif
     if (ext == ".tar") n = sz::build_tar(items, out, prog);
@@ -383,7 +452,7 @@ static void do_create(App* a, std::string outpath) {
     }
     { std::lock_guard<std::mutex> lk(a->mtx);
       a->status = "Writing " + fs::path(outpath).filename().string() + "..."; }
-    bool ok = n && sz::write_file(outpath, out.data(), n);
+    bool ok = n && sz::write_file_atomic(outpath, out.data(), n);
     a->prog_done = a->prog_total.load();
     uintmax_t raw = 0; for (auto& it : items) if (!it.is_dir) raw += it.size;
     bool enc = false, mail = false;
@@ -426,13 +495,13 @@ static void do_extract(App* a, std::string destdir, bool selected_only) {
 #if defined(SATZIP_HAVE_7Z)
     if (kind == AKind::SevenZ) {
         files = sz::sevenz_extract(fs::path(apath), fs::path(destdir), selected_only ? &sel : nullptr,
-            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &failed);
+            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &a->cancel, &failed);
     } else
 #endif
     if (kind == AKind::Tar) {
         files = sz::tar_extract(a->tarbuf.data(), a->tarbuf.size(), a->tentries,
             fs::path(destdir), selected_only ? &sel : nullptr,
-            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &failed);
+            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &a->cancel, &failed);
     } else
     {
         files = sz::extract(a->opened, fs::path(destdir), selected_only ? &sel : nullptr, threads,
@@ -509,9 +578,9 @@ static void do_edit(App* a, std::vector<std::string> add_paths, bool remove_sele
     if (kind == AKind::Satz) {
         size_t bound = SZ_AR_HEADER + SZ_AR_END + SZ_MARGIN;
         for (uint32_t e = 0; e < a->opened.count; ++e)
-            if (!removed[e]) bound += SZ_AR_DIR_FIXED + strlen(a->opened.entries[e].name) +
+            if (!removed[e]) bound += SZ_AR_DIR_BOUND + strlen(a->opened.entries[e].name) +
                                       (size_t)a->opened.entries[e].stored_size;
-        for (auto& it : newitems) bound += SZ_AR_DIR_FIXED + it.name.size() + sz_stream_bound((size_t)it.size, 16);
+        for (auto& it : newitems) bound += SZ_AR_DIR_BOUND + it.name.size() + sz_stream_bound((size_t)it.size, 16);
 
         std::vector<uint8_t> out(bound);
         sz_archive_writer w;
@@ -520,9 +589,11 @@ static void do_edit(App* a, std::vector<std::string> add_paths, bool remove_sele
             size_t total_steps = a->opened.count + newitems.size(), step = 0;
             for (uint32_t e = 0; e < a->opened.count && ok; ++e) {
                 const sz_ar_entry& en = a->opened.entries[e];
-                if (!removed[e])
+                if (!removed[e]) {
                     ok = sz_aw_add_blob(&w, en.name, en.is_dir, en.method, en.crc, en.orig_size,
                                         a->opened.buf.data() + en.offset, (size_t)en.stored_size) == 0;
+                    sz_aw_set_mtime(&w, en.mtime);
+                }
                 a->prog_done = ++step; a->prog_total = total_steps;
             }
             static thread_local std::vector<uint8_t> dummy;
@@ -534,11 +605,12 @@ static void do_edit(App* a, std::vector<std::string> add_paths, bool remove_sele
                     auto data = sz::read_file(it.abs, (size_t)it.size, SZ_MARGIN);
                     ok = sz_aw_add(&w, it.name.c_str(), 0, data.data(), (size_t)it.size, st, accel, cmode) == 0;
                 }
+                sz_aw_set_mtime(&w, it.mtime);
                 a->prog_done = ++step;
             }
             free(st);
             size_t n = sz_aw_finish(&w);
-            ok = ok && n && sz::write_file(apath, out.data(), n);
+            ok = ok && n && sz::write_file_atomic(apath, out.data(), n);
         }
     }
 #if defined(SATZIP_HAVE_ZIP)
@@ -557,18 +629,26 @@ static void do_edit(App* a, std::vector<std::string> add_paths, bool remove_sele
                     if (!removed[e]) ok = mz_zip_writer_add_from_zip_reader(&w2, &r, e) != 0;
                 for (auto& it : newitems) {
                     if (!ok) break;
-                    if (it.is_dir) { std::string d = it.name + "/"; ok = mz_zip_writer_add_mem(&w2, d.c_str(), nullptr, 0, 0) != 0; }
-                    else {
+                    MZ_TIME_T t = (MZ_TIME_T)(it.mtime / 1000000000);
+                    MZ_TIME_T* tp = it.mtime != SZ_AR_NO_MTIME ? &t : nullptr;
+                    std::string ex = sz::zip_time_extra(it.mtime);
+                    mz_uint exn = (mz_uint)ex.size();
+                    if (it.is_dir) {
+                        std::string d = it.name + "/";
+                        ok = mz_zip_writer_add_mem_ex_v2(&w2, d.c_str(), nullptr, 0, nullptr, 0, 0, 0, 0, tp,
+                                                         ex.data(), exn, ex.data(), exn) != 0;
+                    } else {
                         auto data = sz::read_file(it.abs, (size_t)it.size, 0);
                         int lv = (!call && sz::is_precompressed(it.name)) ? 0 : level;
-                        ok = mz_zip_writer_add_mem(&w2, it.name.c_str(), data.data(), data.size(), (mz_uint)lv) != 0;
+                        ok = mz_zip_writer_add_mem_ex_v2(&w2, it.name.c_str(), data.data(), data.size(), nullptr, 0,
+                                                         (mz_uint)lv, 0, 0, tp, ex.data(), exn, ex.data(), exn) != 0;
                     }
                 }
                 void* obuf = nullptr; size_t on = 0;
                 if (ok) ok = mz_zip_writer_finalize_heap_archive(&w2, &obuf, &on) != 0;
                 mz_zip_writer_end(&w2);
                 mz_zip_reader_end(&r);
-                if (ok) ok = sz::write_file(apath, (uint8_t*)obuf, on);
+                if (ok) ok = sz::write_file_atomic(apath, (uint8_t*)obuf, on);
                 if (obuf) mz_free(obuf);
             }
         }
@@ -849,7 +929,7 @@ static void draw_progress(App* a) {
     } else {
         ImGui::ProgressBar(f, ImVec2(-1, 0));
     }
-    { std::lock_guard<std::mutex> lk(a->mtx); ImGui::TextUnformatted(a->status.c_str()); }
+    { std::lock_guard<std::mutex> lk(a->mtx); want_glyphs(a->status); ImGui::TextUnformatted(a->status.c_str()); }
 }
 
 static void wrap_same_line(float need) {
@@ -997,6 +1077,7 @@ static void draw_archive_tab(App* a) {
         ImGui::SameLine(0, 24);
         ImGui::SetNextItemWidth(260);
         ImGui::InputTextWithHint("##search", "Search in archive...", a->search, sizeof(a->search));
+        want_glyphs(a->search);
         ImGui::SetItemTooltip("Filter entries by name (case-insensitive). Double-click an entry to open it.");
         if (ImGui::BeginTable("entries", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                             ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY, ImVec2(0, a->table_h))) {
@@ -1327,10 +1408,23 @@ static void draw_info_tab(App* a) {
         ImGui::TextDisabled("SAT-OBELISK found: %s", a->obelisk.string().c_str());
     else
         ImGui::TextDisabled("SAT-OBELISK not found (install it to enable encrypt-after-create).");
+    ImGui::TextDisabled("Codec CPU path: %s", sz_cpu_path());
     ImGui::TextDisabled("Built with Dear ImGui, ImPlot and GLFW; LZ4 used for comparison.");
 }
 
-static int run_headless_zip(const char* path, std::string* made = nullptr) {
+struct HeadlessJob {
+    std::atomic<size_t> done{0}, total{0};
+    std::atomic<bool> cancel{false}, finished{false};
+    bool create = false;
+    int files = 0, bad = 0;
+    uint64_t raw = 0, packed = 0;
+    std::string error;
+    std::vector<std::string> failed;
+    fs::path dest;
+};
+
+static void headless_zip_job(const char* path, HeadlessJob& j) {
+    sz::Progress prog = [&j](size_t d, size_t t) { j.done = d; j.total = t; };
     std::vector<sz::Item> items;
     fs::path src(path);
     sz::gather(src, items);
@@ -1347,38 +1441,42 @@ static int run_headless_zip(const char* path, std::string* made = nullptr) {
     if (cfg.format == 4) fmt_ext = ".tar.xz";
 #endif
 
-    std::string arc = std::string(path) + fmt_ext;
+    j.dest = std::string(path) + fmt_ext;
     std::error_code ec;
     if (cfg.zipnow_folder && fs::is_regular_file(src, ec)) {
         std::string stem = src.stem().string();
         for (auto& it : items) it.name = stem + "/" + it.name;
         items.insert(items.begin(), { src.parent_path(), stem, true, 0 });
-        arc = (src.parent_path() / (stem + fmt_ext)).string();
+        j.dest = src.parent_path() / (stem + fmt_ext);
     }
+    for (auto& it : items) if (!it.is_dir) { ++j.files; j.raw += it.size; }
 
     std::vector<uint8_t> out;
     size_t n = 0;
 #if defined(SATZIP_HAVE_ZIP)
-    if (cfg.format == 1) n = sz::build_zip(items, out, cfg.level, cfg.compress_all, cfg.threads);
+    if (cfg.format == 1) n = sz::build_zip(items, out, cfg.level, cfg.compress_all, cfg.threads, prog, &j.cancel);
     else
 #endif
 #if defined(SATZIP_HAVE_7Z)
-    if (cfg.format == 3) n = sz::sevenz_write(items, out, cfg.level);
-    else if (cfg.format == 4) n = sz::build_tar_xz(items, out, cfg.level);
+    if (cfg.format == 3) n = sz::sevenz_write(items, out, cfg.level, prog, &j.cancel);
+    else if (cfg.format == 4) n = sz::build_tar_xz(items, out, cfg.level, prog, &j.cancel);
     else
 #endif
-    if (cfg.format == 2) n = sz::build_tar(items, out);
-    else n = sz::build_archive(items, out, accel, cfg.threads, cfg.compress_all, cfg.mode);
-    if (made) *made = arc;
-    if (!n || !sz::write_file(arc, out.data(), n)) {
-#ifdef _WIN32
-        MessageBoxA(nullptr, "Could not create archive.", "SAT-ZIP", MB_ICONERROR);
-#endif
-        return 1;
+    if (cfg.format == 2) n = sz::build_tar(items, out, prog);
+    else n = sz::build_archive(items, out, accel, cfg.threads, cfg.compress_all, cfg.mode, prog, &j.cancel);
+
+    if (!j.cancel) {
+        if (!n) j.error = "Compression failed.";
+        else if (!sz::write_file_atomic(j.dest, out.data(), n))
+            j.error = "The archive could not be written (disk full or no access to the folder?).";
+        else j.packed = n;
     }
-    return 0;
+    j.finished = true;
 }
-static int run_headless_extract(const char* archive, bool subfolder) {
+
+static void headless_extract_job(const char* archive, bool subfolder, HeadlessJob& j) {
+    sz::Progress prog = [&j](size_t d, size_t t) { j.done = d; j.total = t; };
+    fs::path ap(archive);
 #if defined(SATZIP_HAVE_ZIP) || defined(SATZIP_HAVE_7Z)
     bool zip = false, svz = false;
 #if defined(SATZIP_HAVE_ZIP)
@@ -1388,73 +1486,240 @@ static int run_headless_extract(const char* archive, bool subfolder) {
     svz = !zip && sz::is_7z_file(archive);
 #endif
     if (zip || svz) {
-        fs::path ap(archive);
-        fs::path dest = ap.parent_path();
-        if (subfolder) dest /= ap.stem();
-        if (dest.empty()) dest = fs::path(".");
-        int bad = 0;
-        std::vector<std::string> failed;
+        j.dest = ap.parent_path();
+        if (subfolder) j.dest /= ap.stem();
+        if (j.dest.empty()) j.dest = fs::path(".");
 #if defined(SATZIP_HAVE_ZIP)
-        if (zip) sz::zip_extract(ap, dest, nullptr, 0, {}, &bad, nullptr, &failed);
+        if (zip) j.files = sz::zip_extract(ap, j.dest, nullptr, 0, prog, &j.bad, &j.cancel, &j.failed);
 #endif
 #if defined(SATZIP_HAVE_7Z)
-        if (svz) sz::sevenz_extract(ap, dest, nullptr, {}, &bad, &failed);
+        if (svz) j.files = sz::sevenz_extract(ap, j.dest, nullptr, prog, &j.bad, &j.cancel, &j.failed);
 #endif
-        show_failed_dialog(failed);
-        return bad ? 1 : 0;
+        j.finished = true;
+        return;
     }
     {
         bool xzf = false;
 #if defined(SATZIP_HAVE_7Z)
         xzf = sz::is_xz_file(archive);
 #endif
-        if (xzf || fs::path(archive).extension() == ".tar") {
-            fs::path ap(archive);
-            fs::path dest = ap.parent_path();
-            if (subfolder) { fs::path st = ap.stem(); if (st.extension() == ".tar") st = st.stem(); dest /= st; }
-            if (dest.empty()) dest = fs::path(".");
+        if (xzf || ap.extension() == ".tar") {
+            j.dest = ap.parent_path();
+            if (subfolder) { fs::path st = ap.stem(); if (st.extension() == ".tar") st = st.stem(); j.dest /= st; }
+            if (j.dest.empty()) j.dest = fs::path(".");
             std::error_code ec;
             auto fsz = fs::file_size(ap, ec);
-            if (ec) return 1;
-            auto raw = sz::read_file(ap, (size_t)fsz, 0);
             std::vector<uint8_t> tb;
-#if defined(SATZIP_HAVE_7Z)
-            if (sz::is_xz_data(raw.data(), raw.size())) { if (!sz::xz_decompress(raw.data(), raw.size(), tb)) return 1; }
-            else
-#endif
-            tb = std::move(raw);
             std::vector<sz::TarEntry> tes;
-            if (!sz::tar_list(tb.data(), tb.size(), tes)) return 1;
-            int bad = 0;
-            std::vector<std::string> failed;
-            sz::tar_extract(tb.data(), tb.size(), tes, dest, nullptr, {}, &bad, &failed);
-            show_failed_dialog(failed);
-            return bad ? 1 : 0;
+            if (!ec) {
+                auto raw = sz::read_file(ap, (size_t)fsz, 0);
+#if defined(SATZIP_HAVE_7Z)
+                if (sz::is_xz_data(raw.data(), raw.size())) { if (!sz::xz_decompress(raw.data(), raw.size(), tb)) ec = std::make_error_code(std::errc::io_error); }
+                else
+#endif
+                tb = std::move(raw);
+            }
+            if (ec || !sz::tar_list(tb.data(), tb.size(), tes))
+                j.error = "The archive could not be read (damaged or not a tar archive).";
+            else
+                j.files = sz::tar_extract(tb.data(), tb.size(), tes, j.dest, nullptr, prog, &j.bad, &j.cancel, &j.failed);
+            j.finished = true;
+            return;
         }
     }
 #endif
     sz::Archive a;
-    if (!sz::open_archive(fs::path(archive), a)) {
-#ifdef _WIN32
-        MessageBoxA(nullptr, "Not a SAT-ZIP archive.", "SAT-ZIP", MB_ICONERROR);
-#endif
-        return 1;
+    if (!sz::open_archive(ap, a)) {
+        j.error = "Not a SAT-ZIP archive.";
+        j.finished = true;
+        return;
     }
-    fs::path ap(archive);
-    fs::path dest = ap.parent_path();
-    if (subfolder) dest /= ap.stem();
-    if (dest.empty()) dest = fs::path(".");
-    int bad = 0;
-    int files = sz::extract(a, dest, nullptr, 0, {}, &bad);
+    j.dest = ap.parent_path();
+    if (subfolder) j.dest /= ap.stem();
+    if (j.dest.empty()) j.dest = fs::path(".");
+    j.files = sz::extract(a, j.dest, nullptr, 0, prog, &j.bad, &j.cancel, &j.failed);
+    j.finished = true;
+}
+
 #ifdef _WIN32
-    if (bad) {
-        std::string m = "Extracted " + std::to_string(files) + " file(s) to:\n" + dest.string() +
-                        "\n\n" + std::to_string(bad) + " item(s) could not be written "
-                        "(folder access, a name collision, or path length?).";
-        MessageBoxA(nullptr, m.c_str(), "SAT-ZIP", MB_ICONWARNING);
+static std::wstring widen(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    std::wstring w((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), &w[0], n);
+    return w;
+}
+
+enum { SZ_BTN_OPEN_FOLDER = 100 };
+
+struct JobDialog {
+    HeadlessJob* job = nullptr;
+    bool close_when_done = false;
+    std::wstring name, line;
+    std::wstring done_title, done_text, done_details;
+    TASKDIALOGCONFIG done_page{};
+    TASKDIALOG_BUTTON open_btn{ SZ_BTN_OPEN_FOLDER, L"Open folder" };
+    bool on_done_page = false, marquee = true;
+    size_t shown = (size_t)-1;
+};
+
+static HRESULT CALLBACK job_dialog_cb(HWND h, UINT n, WPARAM wp, LPARAM, LONG_PTR ref);
+
+static void build_done_page(JobDialog* d) {
+    HeadlessJob& j = *d->job;
+    std::wstring dest = j.dest.wstring();
+    TASKDIALOGCONFIG& c = d->done_page;
+    c.cbSize = sizeof(c);
+    c.hInstance = GetModuleHandleW(nullptr);
+    c.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_CAN_BE_MINIMIZED;
+    c.pszWindowTitle = L"SAT-ZIP";
+    c.pfCallback = job_dialog_cb;
+    c.lpCallbackData = (LONG_PTR)d;
+    c.dwCommonButtons = TDCBF_CLOSE_BUTTON;
+    c.nDefaultButton = IDCLOSE;
+    if (!j.error.empty()) {
+        c.pszMainIcon = TD_ERROR_ICON;
+        d->done_title = (j.create ? L"Could not create an archive of " : L"Could not extract ") + d->name;
+        d->done_text = widen(j.error);
+    } else if (j.create) {
+        if (!j.packed) {
+            c.pszMainIcon = TD_WARNING_ICON;
+            d->done_title = L"Archive creation cancelled";
+            d->done_text = L"No archive was written.";
+        } else {
+            char s[160];
+            snprintf(s, sizeof(s), "%d file(s), %.1f MB -> %.1f MB (x%.2f)", j.files, j.raw / 1048576.0,
+                     j.packed / 1048576.0, j.packed ? (double)j.raw / j.packed : 0.0);
+            c.pszMainIcon = TD_INFORMATION_ICON;
+            d->done_title = L"Archive created";
+            d->done_text = dest + L"\n" + widen(s);
+            d->open_btn.pszButtonText = L"Show in folder";
+            c.pButtons = &d->open_btn;
+            c.cButtons = 1;
+            c.nDefaultButton = SZ_BTN_OPEN_FOLDER;
+        }
+    } else {
+        std::wstring files = std::to_wstring(j.files) + L" file(s) extracted to:\n" + dest;
+        if (j.files > 0) {
+            c.pButtons = &d->open_btn;
+            c.cButtons = 1;
+            c.nDefaultButton = SZ_BTN_OPEN_FOLDER;
+        }
+        if (j.cancel) {
+            c.pszMainIcon = TD_WARNING_ICON;
+            d->done_title = L"Extraction cancelled";
+            d->done_text = files;
+        } else if (j.bad) {
+            c.pszMainIcon = TD_WARNING_ICON;
+            d->done_title = L"Extraction finished with errors";
+            d->done_text = files + L"\n\n" + std::to_wstring(j.bad) +
+                           L" item(s) could not be extracted (folder access, a name collision, or path length?).";
+            if (!j.failed.empty()) {
+                d->done_details = widen(failed_summary(j.failed).substr(1));
+                c.pszExpandedInformation = d->done_details.c_str();
+                c.pszCollapsedControlText = L"Show failed items";
+                c.pszExpandedControlText = L"Hide failed items";
+            }
+        } else {
+            c.pszMainIcon = TD_INFORMATION_ICON;
+            d->done_title = L"Extraction complete";
+            d->done_text = files;
+        }
     }
+    c.pszMainInstruction = d->done_title.c_str();
+    c.pszContent = d->done_text.c_str();
+}
+
+static HRESULT CALLBACK job_dialog_cb(HWND h, UINT n, WPARAM, LPARAM, LONG_PTR ref) {
+    JobDialog* d = (JobDialog*)ref;
+    HeadlessJob& j = *d->job;
+    if (n == TDN_CREATED) {
+        set_hwnd_icon(h);
+        SendMessageW(h, TDM_SET_PROGRESS_BAR_MARQUEE, TRUE, 30);
+    } else if (n == TDN_TIMER && !d->on_done_page) {
+        if (j.finished) {
+            if (d->close_when_done && j.packed) {
+                SendMessageW(h, TDM_CLICK_BUTTON, IDCANCEL, 0);
+                return S_OK;
+            }
+            build_done_page(d);
+            d->on_done_page = true;
+            SendMessageW(h, TDM_NAVIGATE_PAGE, 0, (LPARAM)&d->done_page);
+            return S_OK;
+        }
+        size_t total = j.total, done = j.done;
+        if (total && d->marquee) {
+            SendMessageW(h, TDM_SET_MARQUEE_PROGRESS_BAR, FALSE, 0);
+            SendMessageW(h, TDM_SET_PROGRESS_BAR_RANGE, 0, MAKELPARAM(0, 1000));
+            d->marquee = false;
+        }
+        if (total && done != d->shown && !j.cancel) {
+            d->shown = done;
+            SendMessageW(h, TDM_SET_PROGRESS_BAR_POS, (WPARAM)(done * 1000 / total), 0);
+            d->line = L"To: " + j.dest.wstring() + L"\n" +
+                      (j.create ? std::to_wstring(done * 100 / total) + L"%"
+                                : std::to_wstring(done) + L" of " + std::to_wstring(total) + L" items");
+            SendMessageW(h, TDM_SET_ELEMENT_TEXT, TDE_CONTENT, (LPARAM)d->line.c_str());
+        }
+    } else if (n == TDN_BUTTON_CLICKED && !d->on_done_page && !j.finished) {
+        j.cancel = true;
+        SendMessageW(h, TDM_ENABLE_BUTTON, IDCANCEL, FALSE);
+        SendMessageW(h, TDM_SET_ELEMENT_TEXT, TDE_MAIN_INSTRUCTION, (LPARAM)L"Cancelling...");
+        return S_FALSE;
+    }
+    return S_OK;
+}
+
+static void run_job_dialog(HeadlessJob& j, JobDialog& d, const std::wstring& title, const wchar_t* first_line,
+                           const std::function<void()>& work) {
+    std::thread worker(work);
+    d.job = &j;
+    d.line = first_line;
+    TASKDIALOGCONFIG c{};
+    c.cbSize = sizeof(c);
+    c.hInstance = GetModuleHandleW(nullptr);
+    c.dwFlags = TDF_SHOW_MARQUEE_PROGRESS_BAR | TDF_CALLBACK_TIMER | TDF_ALLOW_DIALOG_CANCELLATION |
+                TDF_CAN_BE_MINIMIZED;
+    c.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+    c.pszWindowTitle = L"SAT-ZIP";
+    c.pszMainInstruction = title.c_str();
+    c.pszContent = d.line.c_str();
+    c.pfCallback = job_dialog_cb;
+    c.lpCallbackData = (LONG_PTR)&d;
+    int button = 0;
+    TaskDialogIndirect(&c, &button, nullptr, nullptr);
+    if (!j.finished) j.cancel = true;
+    worker.join();
+    if (button == SZ_BTN_OPEN_FOLDER) open_in_explorer(j.dest);
+}
 #endif
-    return bad ? 1 : 0;
+
+static int run_headless_zip(const char* path, bool mail) {
+    HeadlessJob j;
+    j.create = true;
+#ifdef _WIN32
+    JobDialog d;
+    d.name = fs::path(path).filename().wstring();
+    d.close_when_done = mail;
+    run_job_dialog(j, d, L"Compressing " + d.name, L"Scanning files...\n", [&] { headless_zip_job(path, j); });
+#else
+    headless_zip_job(path, j);
+#endif
+    if (j.packed && mail) sz::mail_with_attachment(j.dest);
+    return j.packed ? 0 : 1;
+}
+
+static int run_headless_extract(const char* archive, bool subfolder) {
+    HeadlessJob j;
+#ifdef _WIN32
+    JobDialog d;
+    d.name = fs::path(archive).filename().wstring();
+    run_job_dialog(j, d, L"Extracting " + d.name, L"Reading archive...\n",
+                   [&] { headless_extract_job(archive, subfolder, j); });
+#else
+    headless_extract_job(archive, subfolder, j);
+#endif
+    return (j.bad || !j.error.empty()) ? 1 : 0;
 }
 
 #ifdef _WIN32
@@ -1532,13 +1797,8 @@ static void install_crash_log() {
 
 int main(int argc, char** argv) {
     install_crash_log();
-    if (argc >= 3 && std::string(argv[1]) == "--zip")   return run_headless_zip(argv[2]);
-    if (argc >= 3 && std::string(argv[1]) == "--zipmail") {
-        std::string made;
-        int rc = run_headless_zip(argv[2], &made);
-        if (rc == 0) sz::mail_with_attachment(fs::path(made));
-        return rc;
-    }
+    if (argc >= 3 && std::string(argv[1]) == "--zip")     return run_headless_zip(argv[2], false);
+    if (argc >= 3 && std::string(argv[1]) == "--zipmail") return run_headless_zip(argv[2], true);
     if (argc >= 3 && std::string(argv[1]) == "--xhere") return run_headless_extract(argv[2], false);
     if (argc >= 3 && std::string(argv[1]) == "--xto")   return run_headless_extract(argv[2], true);
     std::string launch_path = (argc >= 2) ? std::string(argv[1]) : std::string();
@@ -1572,21 +1832,7 @@ int main(int argc, char** argv) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImPlot::CreateContext();
-#ifdef _WIN32
-    if (fs::exists("C:\\Windows\\Fonts\\segoeui.ttf"))
-        ImGui::GetIO().Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 18.0f);
-    if (fs::exists("C:\\Windows\\Fonts\\segmdl2.ttf")) {
-        static const ImWchar icon_range[] = { 0xE700, 0xE900, 0 };
-        ImFontConfig mcfg;
-        mcfg.MergeMode = true;
-        mcfg.GlyphMinAdvanceX = 18.0f;
-        mcfg.GlyphOffset = ImVec2(0, 2);
-        g_icons = ImGui::GetIO().Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segmdl2.ttf",
-                                                           15.0f, &mcfg, icon_range) != nullptr;
-    }
-    if (fs::exists("C:\\Windows\\Fonts\\segoeuib.ttf"))
-        g_font_bold = ImGui::GetIO().Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeuib.ttf", 18.0f);
-#endif
+    load_fonts();
     apply_style(app.settings.dark);
     ImGui_ImplGlfw_InitForOpenGL(win, true);
     ImGui_ImplOpenGL3_Init("#version 130");
@@ -1603,6 +1849,12 @@ int main(int argc, char** argv) {
     int prev_tab = 0;
     while (!glfwWindowShouldClose(win)) {
         glfwPollEvents();
+        if (g_glyph_dirty.exchange(false)) {
+            ImGui::GetIO().Fonts->Clear();
+            load_fonts();
+            ImGui_ImplOpenGL3_DestroyFontsTexture();
+            ImGui_ImplOpenGL3_CreateFontsTexture();
+        }
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();

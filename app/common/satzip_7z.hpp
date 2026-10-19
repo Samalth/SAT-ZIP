@@ -24,6 +24,15 @@ namespace sevenz {
 
 inline ISzAlloc& alloc() { static ISzAlloc a = { SzAlloc, SzFree }; return a; }
 
+struct EncProgress { ICompressProgress vt; const Progress* progress; const std::atomic<bool>* cancel; uint64_t total; };
+
+inline SRes enc_progress(const ICompressProgress* pp, UInt64 in_size, UInt64) {
+    const EncProgress* e = (const EncProgress*)pp;
+    if (e->cancel && *e->cancel) return SZ_ERROR_PROGRESS;
+    if (*e->progress && in_size != (UInt64)(Int64)-1) (*e->progress)((size_t)in_size, (size_t)e->total);
+    return SZ_OK;
+}
+
 struct MemStream { ISeekInStream vt; const uint8_t* data; size_t size; size_t pos; };
 
 inline SRes mem_read(const ISeekInStream* pp, void* buf, size_t* size) {
@@ -108,6 +117,7 @@ inline bool sevenz_list(const fs::path& p, std::vector<SevenZEntry>& out) {
 
 inline int sevenz_extract(const fs::path& p, const fs::path& dest, const std::vector<int>* sel,
                           const Progress& progress = {}, int* failures = nullptr,
+                          const std::atomic<bool>* cancel = nullptr,
                           std::vector<std::string>* failed_names = nullptr) {
     sevenz::Reader r;
     if (!r.open(p)) { if (failures) *failures = 1; return 0; }
@@ -116,6 +126,12 @@ inline int sevenz_extract(const fs::path& p, const fs::path& dest, const std::ve
     if (sel) { for (int s : *sel) idx.push_back((uint32_t)s); }
     else     { for (UInt32 i = 0; i < r.db.NumFiles; ++i) idx.push_back(i); }
 
+    auto mtime_of = [&r](uint32_t i) -> int64_t {
+        if (!SzBitWithVals_Check(&r.db.MTime, i)) return SZ_AR_NO_MTIME;
+        const CNtfsFileTime& ft = r.db.MTime.Vals[i];
+        return ((int64_t)(((uint64_t)ft.High << 32) | ft.Low) - 116444736000000000LL) * 100;
+    };
+    std::vector<std::pair<fs::path, int64_t>> dir_times;
     UInt32 blockIndex = 0xFFFFFFFF;
     Byte*  outBuffer = NULL;
     size_t outBufferSize = 0;
@@ -124,6 +140,7 @@ inline int sevenz_extract(const fs::path& p, const fs::path& dest, const std::ve
     std::error_code ec;
 
     for (uint32_t i : idx) {
+        if (cancel && *cancel) break;
         std::string nm = r.name(i);
         fs::path rel = fs::path(nm).lexically_normal();
         bool this_ok = true;
@@ -131,13 +148,14 @@ inline int sevenz_extract(const fs::path& p, const fs::path& dest, const std::ve
             fs::path dst = dest / rel;
             if (SzArEx_IsDir(&r.db, i)) {
                 fs::create_directories(dst, ec);
+                dir_times.push_back({ dst, mtime_of(i) });
             } else {
                 size_t offset = 0, outSize = 0;
                 SRes res = SzArEx_Extract(&r.db, &r.look.vt, i, &blockIndex,
                                           &outBuffer, &outBufferSize, &offset, &outSize,
                                           &sevenz::alloc(), &sevenz::alloc());
                 fs::create_directories(dst.parent_path(), ec);
-                if (res == SZ_OK && write_file(dst, outBuffer + offset, outSize)) ++files;
+                if (res == SZ_OK && write_file(dst, outBuffer + offset, outSize)) { restore_mtime(dst, mtime_of(i)); ++files; }
                 else this_ok = false;
             }
         } else this_ok = false;
@@ -148,6 +166,7 @@ inline int sevenz_extract(const fs::path& p, const fs::path& dest, const std::ve
         if (progress) progress(++done, idx.size());
     }
     if (outBuffer) sevenz::alloc().Free(&sevenz::alloc(), outBuffer);
+    for (auto& d : dir_times) restore_mtime(d.first, d.second);
     if (failures) *failures = bad;
     return files;
 }

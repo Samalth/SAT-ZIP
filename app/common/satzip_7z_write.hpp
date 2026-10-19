@@ -53,7 +53,8 @@ inline void wr_name(std::vector<uint8_t>& out, const std::string& s) {
 }
 
 inline size_t sevenz_write(const std::vector<Item>& items, std::vector<uint8_t>& out,
-                           int level, const Progress& progress = {}) {
+                           int level, const Progress& progress = {},
+                           const std::atomic<bool>* cancel = nullptr) {
     using namespace sevenz;
     if (level < 1) level = 1; if (level > 9) level = 9;
 
@@ -63,8 +64,8 @@ inline size_t sevenz_write(const std::vector<Item>& items, std::vector<uint8_t>&
     std::vector<char> empty_stream, empty_file;
     bool any_empty = false, any_empty_file = false;
 
-    size_t done = 0;
     for (const auto& it : items) {
+        if (cancel && *cancel) return 0;
         if (it.is_dir)        { empty_stream.push_back(1); empty_file.push_back(0); any_empty = true; }
         else if (it.size == 0) { empty_stream.push_back(1); empty_file.push_back(1); any_empty = true; any_empty_file = true; }
         else {
@@ -74,7 +75,6 @@ inline size_t sevenz_write(const std::vector<Item>& items, std::vector<uint8_t>&
             csizes.push_back(data.size());
             raw.insert(raw.end(), data.begin(), data.end());
         }
-        if (progress) progress(++done, items.size());
     }
 
     std::vector<uint8_t> packed;
@@ -85,8 +85,9 @@ inline size_t sevenz_write(const std::vector<Item>& items, std::vector<uint8_t>&
         p.level = level; p.reduceSize = raw.size();
         packed.resize(raw.size() + raw.size() / 2 + 4096);
         SizeT destLen = packed.size(), ps = 5;
+        EncProgress ep{ { enc_progress }, &progress, cancel, raw.size() };
         SRes r = LzmaEncode(packed.data(), &destLen, raw.data(), raw.size(), &p,
-                            propsEnc, &ps, 0, nullptr, &sevenz::alloc(), &sevenz::alloc());
+                            propsEnc, &ps, 0, &ep.vt, &sevenz::alloc(), &sevenz::alloc());
         if (r != SZ_OK || ps != 5) return 0;
         packed.resize(destLen);
     }
@@ -130,6 +131,20 @@ inline size_t sevenz_write(const std::vector<Item>& items, std::vector<uint8_t>&
         std::vector<uint8_t> names; names.push_back(0);
         for (const auto& it : items) wr_name(names, it.name);
         h.push_back(0x11); wr_num(h, names.size()); h.insert(h.end(), names.begin(), names.end());
+    }
+    {
+        std::vector<char> defined;
+        size_t ndef = 0;
+        for (const auto& it : items) { bool d = it.mtime != SZ_AR_NO_MTIME; defined.push_back(d); ndef += d; }
+        if (ndef) {
+            std::vector<uint8_t> t;
+            if (ndef == items.size()) t.push_back(1);
+            else { t.push_back(0); wr_bits(t, defined); }
+            t.push_back(0);
+            for (const auto& it : items)
+                if (it.mtime != SZ_AR_NO_MTIME) wr_u64(t, (uint64_t)(it.mtime / 100 + 116444736000000000LL));
+            h.push_back(0x14); wr_num(h, t.size()); h.insert(h.end(), t.begin(), t.end());
+        }
     }
     h.push_back(0x00);
     h.push_back(0x00);

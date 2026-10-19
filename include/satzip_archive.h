@@ -8,10 +8,12 @@ extern "C" {
 #endif
 
 #define SZ_AR_HEADER       8
-#define SZ_AR_DIR_FIXED    32
+#define SZ_AR_DIR_FIXED    36
+#define SZ_AR_DIR_BOUND    48
 #define SZ_AR_END          16
 #define SZ_AR_FILE         0
 #define SZ_AR_DIR          1
+#define SZ_AR_NO_MTIME     INT64_MIN
 
 uint32_t sz_crc32(const uint8_t* data, size_t n);
 
@@ -29,6 +31,7 @@ int    sz_aw_add(sz_archive_writer* w, const char* name, int is_dir,
 int    sz_aw_add_blob(sz_archive_writer* w, const char* name, int is_dir,
                       uint8_t method, uint32_t crc, uint64_t orig,
                       const uint8_t* payload, size_t stored);
+int    sz_aw_set_mtime(sz_archive_writer* w, int64_t mtime_ns);
 size_t sz_aw_finish(sz_archive_writer* w);
 
 typedef struct {
@@ -37,6 +40,7 @@ typedef struct {
     uint8_t  method;
     uint32_t crc;
     uint64_t orig_size, stored_size, offset;
+    int64_t  mtime;
 } sz_ar_entry;
 
 int    sz_ar_open(const uint8_t* arc, size_t n, sz_ar_entry** entries, uint32_t* count);
