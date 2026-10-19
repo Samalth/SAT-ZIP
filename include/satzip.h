@@ -69,6 +69,10 @@ SZ_INLINE unsigned sz_ctz64(uint64_t x) {
 #endif
 }
 
+SZ_INLINE uint32_t sz_hash5(uint64_t x) {
+    return (uint32_t)(((x << 24) * 889523592379ULL) >> (64 - SZ_HLOG));
+}
+
 SZ_INLINE uint32_t sz_hash8(uint64_t x) {
     return (uint32_t)((x * 0x9E3779B185EBCA87ULL) >> (64 - SZ_HLOG));
 }

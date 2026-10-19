@@ -11,6 +11,7 @@
 #include "satzip_7z_write.hpp"
 #include "satzip_tar.hpp"
 #include "satzip_xz.hpp"
+#include "satzip_any.hpp"
 #include "satzip_version.h"
 
 #include <cstdio>
@@ -78,79 +79,18 @@ static int cmd_add(const char* archive, int npaths, char** paths) {
     return 0;
 }
 static int cmd_extract(const char* archive, const char* destdir) {
-#if defined(SATZIP_HAVE_ZIP)
-    if (is_zip_file(archive)) {
-        fs::path root = destdir ? destdir : ".";
-        int bad = 0;
-        int files = zip_extract(archive, root, nullptr, 0, {}, &bad);
-        std::printf("extracted %d file(s) from zip to %s%s\n", files, root.string().c_str(),
-                    bad ? " (some failed)" : "");
-        return bad ? 1 : 0;
-    }
-#endif
-#if defined(SATZIP_HAVE_7Z)
-    if (is_7z_file(archive)) {
-        fs::path root = destdir ? destdir : ".";
-        int bad = 0;
-        int files = sevenz_extract(archive, root, nullptr, {}, &bad);
-        std::printf("extracted %d file(s) from 7z to %s%s\n", files, root.string().c_str(),
-                    bad ? " (some failed)" : "");
-        return bad ? 1 : 0;
-    }
-#endif
-    {
-        bool xzf = false;
-#if defined(SATZIP_HAVE_7Z)
-        xzf = is_xz_file(archive);
-#endif
-        if (xzf || fs::path(archive).extension() == ".tar") {
-            std::error_code ec;
-            auto fsz = fs::file_size(archive, ec);
-            if (ec) { std::fprintf(stderr, "satzip: cannot open %s\n", archive); return 1; }
-            auto raw = read_file(archive, (size_t)fsz, 0);
-            std::vector<uint8_t> tb;
-#if defined(SATZIP_HAVE_7Z)
-            if (is_xz_data(raw.data(), raw.size())) {
-                if (!xz_decompress(raw.data(), raw.size(), tb)) { std::fprintf(stderr, "satzip: corrupt xz\n"); return 1; }
-            } else
-#endif
-            tb = std::move(raw);
-            std::vector<TarEntry> tes;
-            if (!tar_list(tb.data(), tb.size(), tes)) { std::fprintf(stderr, "satzip: not a tar\n"); return 1; }
-            fs::path root = destdir ? destdir : ".";
-            int bad = 0;
-            int files = tar_extract(tb.data(), tb.size(), tes, root, nullptr, {}, &bad);
-            std::printf("extracted %d file(s) from tar to %s%s\n", files, root.string().c_str(),
-                        bad ? " (some failed)" : "");
-            return bad ? 1 : 0;
-        }
-    }
-    Archive a;
-    if (!open_archive(archive, a)) { std::fprintf(stderr, "satzip: %s is not a SAT-ZIP archive\n", archive); return 1; }
     fs::path root = destdir ? destdir : ".";
-    int bad = 0;
-    int files = extract(a, root, nullptr, 0, {}, &bad);
-    std::printf("extracted %d file(s) to %s%s\n", files, root.string().c_str(), bad ? " (some failed)" : "");
-    return bad ? 1 : 0;
+    ExtractResult r = extract_any(archive, root);
+    if (!r.error.empty()) { std::fprintf(stderr, "satzip: %s: %s\n", archive, r.error.c_str()); return 1; }
+    std::printf("extracted %d file(s) to %s%s\n", r.files, root.string().c_str(), r.bad ? " (some failed)" : "");
+    return r.bad ? 1 : 0;
 }
+
 static int cmd_list(const char* archive) {
     {
-        bool xzf = false;
-#if defined(SATZIP_HAVE_7Z)
-        xzf = is_xz_file(archive);
-#endif
-        if (xzf || fs::path(archive).extension() == ".tar") {
-            std::error_code ec;
-            auto fsz = fs::file_size(archive, ec);
-            if (ec) { std::fprintf(stderr, "satzip: cannot open %s\n", archive); return 1; }
-            auto raw = read_file(archive, (size_t)fsz, 0);
+        if (is_tar_or_xz(archive)) {
             std::vector<uint8_t> tb;
-#if defined(SATZIP_HAVE_7Z)
-            if (is_xz_data(raw.data(), raw.size())) {
-                if (!xz_decompress(raw.data(), raw.size(), tb)) { std::fprintf(stderr, "satzip: corrupt xz\n"); return 1; }
-            } else
-#endif
-            tb = std::move(raw);
+            if (!load_tar_bytes(archive, tb)) { std::fprintf(stderr, "satzip: cannot read %s\n", archive); return 1; }
             std::vector<TarEntry> tes;
             if (!tar_list(tb.data(), tb.size(), tes)) { std::fprintf(stderr, "satzip: not a tar\n"); return 1; }
             std::printf("%12s  %s\n", "orig", "name");
@@ -215,10 +155,7 @@ static int cmd_add_auto(const char* path) {
     return cmd_add(arc.c_str(), 1, p);
 }
 static int cmd_extract_to(const char* archive, bool subfolder) {
-    fs::path a(archive);
-    fs::path dest = a.parent_path();
-    if (subfolder) dest /= a.stem();
-    std::string ds = dest.empty() ? std::string(".") : dest.string();
+    std::string ds = default_extract_dir(archive, subfolder).string();
     return cmd_extract(archive, ds.c_str());
 }
 

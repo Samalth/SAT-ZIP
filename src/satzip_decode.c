@@ -42,20 +42,25 @@ size_t sz_decompress_block(const uint8_t* src, size_t src_len,
         const uint32_t token  = *ip++;
         size_t         litlen = token >> 4;
 
-        if (SZ_UNLIKELY(litlen == 15)) {
-            litlen = sz_read_ext(&ip, iend, 15);
-            if (SZ_UNLIKELY(litlen == SZ_ERR)) return SZ_ERR;
-        }
-
-        uint8_t* const lit_end = op + litlen;
-        if (SZ_LIKELY(lit_end <= olimit && ip + litlen <= ilimit)) {
-            sz_wildcopy(op, ip, lit_end);
+        if (SZ_LIKELY(litlen < 15 && ip + 16 <= ilimit && op + 16 <= olimit)) {
+            memcpy(op, ip, 16);
+            op += litlen;
+            ip += litlen;
         } else {
-            if (SZ_UNLIKELY(lit_end > oend || ip + litlen > iend)) return SZ_ERR;
-            memcpy(op, ip, litlen);
+            if (SZ_UNLIKELY(litlen == 15)) {
+                litlen = sz_read_ext(&ip, iend, 15);
+                if (SZ_UNLIKELY(litlen == SZ_ERR)) return SZ_ERR;
+            }
+            uint8_t* const lit_end = op + litlen;
+            if (SZ_LIKELY(lit_end <= olimit && ip + litlen <= ilimit)) {
+                sz_wildcopy(op, ip, lit_end);
+            } else {
+                if (SZ_UNLIKELY(lit_end > oend || ip + litlen > iend)) return SZ_ERR;
+                memcpy(op, ip, litlen);
+            }
+            op  = lit_end;
+            ip += litlen;
         }
-        op  = lit_end;
-        ip += litlen;
 
         if (SZ_UNLIKELY(ip >= iend)) break;
 
@@ -65,6 +70,13 @@ size_t sz_decompress_block(const uint8_t* src, size_t src_len,
         if (SZ_UNLIKELY(off == 0 || match < dst)) return SZ_ERR;
 
         size_t mcode = token & 15;
+        if (SZ_LIKELY(mcode < 15 && off >= 8 && op + 24 <= olimit)) {
+            memcpy(op, match, 8);
+            memcpy(op + 8, match + 8, 8);
+            memcpy(op + 16, match + 16, 8);
+            op += mcode + SZ_MIN_MATCH;
+            continue;
+        }
         if (SZ_UNLIKELY(mcode == 15)) {
             mcode = sz_read_ext(&ip, iend, 15);
             if (SZ_UNLIKELY(mcode == SZ_ERR)) return SZ_ERR;
@@ -73,8 +85,9 @@ size_t sz_decompress_block(const uint8_t* src, size_t src_len,
         uint8_t* const m_end = op + mlen;
 
         if (SZ_UNLIKELY(m_end > oend)) return SZ_ERR;
-        if (SZ_LIKELY(off >= 8)) sz_copy_match8(op, match, m_end);
-        else                     sz_copy_match_small(op, match, m_end, off);
+        if (SZ_LIKELY(off >= 32))  sz_wildcopy(op, match, m_end);
+        else if (SZ_LIKELY(off >= 8)) sz_copy_match8(op, match, m_end);
+        else                       sz_copy_match_small(op, match, m_end, off);
         op = m_end;
     }
 

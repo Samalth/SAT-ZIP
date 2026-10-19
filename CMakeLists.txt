@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(satzip VERSION 0.6.0 LANGUAGES C)   # <-- ssot for version
+project(satzip VERSION 0.7.0 LANGUAGES C)   # <-- ssot for version
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -193,6 +193,19 @@ if(SATZIP_BUILD_GUI)
 
     add_executable(satzip_gui
         app/gui/main.cpp
+        app/gui/archive_ops.cpp
+        app/gui/benchmark.cpp
+        app/gui/fonts.cpp
+        app/gui/headless_jobs.cpp
+        app/gui/job_window.cpp
+        app/gui/platform.cpp
+        app/gui/tab_archive.cpp
+        app/gui/tab_benchmark.cpp
+        app/gui/tab_info.cpp
+        app/gui/tab_settings.cpp
+        app/gui/theme.cpp
+        app/gui/ui_window.cpp
+        app/gui/widgets.cpp
         ${imgui_SOURCE_DIR}/imgui.cpp
         ${imgui_SOURCE_DIR}/imgui_draw.cpp
         ${imgui_SOURCE_DIR}/imgui_tables.cpp
@@ -226,7 +239,7 @@ if(SATZIP_BUILD_GUI)
 
      if(WIN32)
         set_target_properties(satzip_gui PROPERTIES WIN32_EXECUTABLE TRUE)
-        target_link_libraries(satzip_gui PRIVATE comdlg32 comctl32 shell32 ole32 windowsapp)  # dialogs + WinRT share
+        target_link_libraries(satzip_gui PRIVATE comdlg32 shell32 ole32 windowsapp)  # dialogs + WinRT share
         if(MSVC)
             target_link_options(satzip_gui PRIVATE /ENTRY:mainCRTStartup)
             target_compile_definitions(satzip_gui PRIVATE _SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)

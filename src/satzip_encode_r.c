@@ -3,7 +3,7 @@
 SZ_INLINE size_t sz_find_r(const uint8_t* in, const uint8_t* p, sz_state_t* st,
                            const uint8_t* mlimit, uint32_t* off_out, int depth) {
     uint32_t pos = (uint32_t)(p - in);
-    uint32_t h   = sz_hash8(sz_load64(p));
+    uint32_t h   = sz_hash5(sz_load64(p));
     uint32_t ref = st->table[h];
     st->chain[pos] = (uint16_t)ref;
     st->table[h]   = pos;
@@ -52,13 +52,14 @@ size_t sz_compress_block_r(sz_state_t* st, const uint8_t* in, size_t in_len, uin
             if (mlen2 > mlen) { ++ip; off = off2; mlen = mlen2; }
             else break;
         }
+        while (ip > anchor && ip - off > in && ip[-1] == (ip - off)[-1]) { --ip; ++mlen; }
 
         op = sz_emit_token(op, anchor, (size_t)(ip - anchor), off, mlen - SZ_MIN_MATCH);
 
         const uint8_t* mend = ip + mlen;
         for (const uint8_t* q = ip + 1; q < mend; ++q) {
             uint32_t qp = (uint32_t)(q - in);
-            uint32_t qh = sz_hash8(sz_load64(q));
+            uint32_t qh = sz_hash5(sz_load64(q));
             st->chain[qp] = (uint16_t)st->table[qh];
             st->table[qh] = qp;
         }

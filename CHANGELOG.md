@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.0
+- New look: changed style colors in dark and light
+- The empty Archive tab is now a drop zone with buttons
+- Status bar at the bottom. The progress bar and Cancel only show up while something is running
+- File lists fill the window and show sizes in KB/MB/GB instead of bytes
+- The Explorer progress window uses your theme and stays on top
+- Faster extraction for Mode S and R. Mode S now extracts clearly faster than LZ4
+- Mode R and T make smaller archives (up to about 15%)
+- GUI code split into smaller files, nothing changes for you
+
+- Fixed: `satzip xto` on a .tar.xz extracted into a folder named `name.tar`
+- Fixed: UI showed blurry texts in some window sizes
+
 ## 0.6.0
 - File dates are kept: archives store modification times and extracting restores them, in every format
 - .tar archives no longer give your files a 1970 date

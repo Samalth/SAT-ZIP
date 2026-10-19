@@ -42,6 +42,7 @@ size_t sz_compress_block(sz_state_t* st, const uint8_t* in, size_t in_len, uint8
 
         size_t mlen = sz_match_len(ip, match, mlimit);
         if (SZ_UNLIKELY(mlen < SZ_MIN_MATCH)) goto finish;
+        while (ip > anchor && match > in && ip[-1] == match[-1]) { --ip; --match; ++mlen; }
 
         op = sz_emit_token(op, anchor, (size_t)(ip - anchor), off, mlen - SZ_MIN_MATCH);
         ip    += mlen;
