@@ -110,3 +110,6 @@ Windows 10/11, x64 with AVX2 (runtime dispatch for older CPUs is on the roadmap 
 
 ## License
 Apache License 2.0 - see [LICENSE](LICENSE).
+
+SAT-ZIP uses LZ4, miniz, the LZMA SDK, Dear ImGui, ImPlot and GLFW. Their licenses are in
+[THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt).
