@@ -6,6 +6,7 @@
 
 #include "archive_ops.hpp"
 #include "fonts.hpp"
+#include "platform.hpp"
 #include "satzip_zip.hpp"
 #include "satzip_7z.hpp"
 #include "satzip_7z_write.hpp"
@@ -55,7 +56,7 @@ static bool load_archive_into(App* a, const std::string& path) {
     if (sz::is_zip_file(path)) {
         std::vector<sz::ZipEntry> zes;
         if (sz::zip_list(path, zes)) {
-            for (auto& z : zes) ve.push_back({ z.name, z.is_dir, z.orig, z.stored, z.idx });
+            for (auto& z : zes) ve.push_back({ z.name, z.is_dir, z.orig, z.stored, z.idx, z.mtime });
             kind = AKind::Zip; ok = true;
         }
     } else
@@ -64,7 +65,7 @@ static bool load_archive_into(App* a, const std::string& path) {
     if (sz::is_7z_file(path)) {
         std::vector<sz::SevenZEntry> ses;
         if (sz::sevenz_list(path, ses)) {
-            for (auto& s : ses) ve.push_back({ s.name, s.is_dir, s.orig, 0, s.idx });
+            for (auto& s : ses) ve.push_back({ s.name, s.is_dir, s.orig, 0, s.idx, s.mtime });
             kind = AKind::SevenZ; ok = true;
         }
     } else
@@ -74,7 +75,7 @@ static bool load_archive_into(App* a, const std::string& path) {
         std::vector<sz::TarEntry> tes;
         if (sz::load_tar_bytes(path, tb) && !tb.empty() && sz::tar_list(tb.data(), tb.size(), tes)) {
             for (uint32_t i = 0; i < tes.size(); ++i)
-                ve.push_back({ tes[i].name, tes[i].is_dir, tes[i].size, 0, i });
+                ve.push_back({ tes[i].name, tes[i].is_dir, tes[i].size, 0, i, tes[i].mtime });
             std::lock_guard<std::mutex> lk(a->mtx);
             a->tarbuf = std::move(tb);
             a->tentries = std::move(tes);
@@ -84,10 +85,30 @@ static bool load_archive_into(App* a, const std::string& path) {
     if (sz::open_archive(path, tmp)) {
         for (uint32_t i = 0; i < tmp.count; ++i) {
             const sz_ar_entry& e = tmp.entries[i];
-            ve.push_back({ e.name, e.is_dir != 0, e.orig_size, e.stored_size, i });
+            ve.push_back({ e.name, e.is_dir != 0, e.orig_size, e.stored_size, i, e.mtime });
         }
         kind = AKind::Satz; ok = true;
     }
+
+    bool embedded = false;
+#if defined(SATZIP_HAVE_ZIP)
+    if (!ok) {
+        std::vector<sz::ZipEntry> zes;
+        if (sz::zip_list(path, zes)) {
+            for (auto& z : zes) ve.push_back({ z.name, z.is_dir, z.orig, z.stored, z.idx, z.mtime });
+            kind = AKind::Zip; ok = true; embedded = true;
+        }
+    }
+#endif
+#if defined(SATZIP_HAVE_7Z)
+    if (!ok) {
+        std::vector<sz::SevenZEntry> ses;
+        if (sz::sevenz_list(path, ses)) {
+            for (auto& s : ses) ve.push_back({ s.name, s.is_dir, s.orig, 0, s.idx, s.mtime });
+            kind = AKind::SevenZ; ok = true; embedded = true;
+        }
+    }
+#endif
 
     for (const auto& v : ve) want_glyphs(v.name);
     { std::lock_guard<std::mutex> lk(a->mtx);
@@ -99,16 +120,15 @@ static bool load_archive_into(App* a, const std::string& path) {
               tmp.entries = nullptr; tmp.count = 0;
           }
           a->okind = kind;
+          a->opened_readonly = embedded;
           a->ventries = std::move(ve);
-          a->selected.assign(a->ventries.size(), 0);
-          a->view_order.clear();
-          a->filter_applied = "\x01";
+          ++a->ventries_rev;
           a->opened_path = path;
           a->mode = Mode::Viewing;
           a->status = "Opened " + fs::path(path).filename().string() +
                       " (" + std::to_string(a->ventries.size()) + " entries)";
       } else {
-          a->status = "Could not open " + fs::path(path).filename().string();
+          a->status = "Could not open " + fs::path(path).filename().string() + " (not a supported archive)";
       } }
     return ok;
 }
@@ -125,6 +145,11 @@ static bool is_archive_path(const fs::path& p) {
     if (p.extension() == ".xz" && sz::is_xz_file(p)) return true;
 #endif
     return false;
+}
+
+void open_path(App* a, const std::string& path) {
+    if (a->running) return;
+    launch(a, std::thread(do_open, a, path));
 }
 
 void stage_paths(App* a, const std::vector<std::string>& paths) {
@@ -201,37 +226,36 @@ void do_create(App* a, std::string outpath) {
     a->running = false;
 }
 
-void do_extract(App* a, std::string destdir, bool selected_only) {
+void do_extract(App* a, std::string destdir, std::vector<uint32_t> entries, std::string strip) {
     a->running = true;
+    const bool selected_only = !entries.empty();
     std::vector<int> sel; int threads; AKind kind; std::string apath;
     { std::lock_guard<std::mutex> lk(a->mtx);
       threads = a->settings.threads; kind = a->okind; apath = a->opened_path;
-      if (selected_only)
-          for (size_t i = 0; i < a->ventries.size(); ++i)
-              if (a->selected[i]) sel.push_back((int)a->ventries[i].idx); }
+      for (uint32_t i : entries) if (i < a->ventries.size()) sel.push_back((int)a->ventries[i].idx); }
     a->prog_done = 0; a->prog_total = selected_only ? sel.size() : a->ventries.size();
     int bad = 0, files = 0;
     std::vector<std::string> failed;
 #if defined(SATZIP_HAVE_ZIP)
     if (kind == AKind::Zip) {
         files = sz::zip_extract(fs::path(apath), fs::path(destdir), selected_only ? &sel : nullptr, threads,
-            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &a->cancel, &failed);
+            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &a->cancel, &failed, strip);
     } else
 #endif
 #if defined(SATZIP_HAVE_7Z)
     if (kind == AKind::SevenZ) {
         files = sz::sevenz_extract(fs::path(apath), fs::path(destdir), selected_only ? &sel : nullptr,
-            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &a->cancel, &failed);
+            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &a->cancel, &failed, strip);
     } else
 #endif
     if (kind == AKind::Tar) {
         files = sz::tar_extract(a->tarbuf.data(), a->tarbuf.size(), a->tentries,
             fs::path(destdir), selected_only ? &sel : nullptr,
-            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &a->cancel, &failed);
+            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &a->cancel, &failed, strip);
     } else
     {
         files = sz::extract(a->opened, fs::path(destdir), selected_only ? &sel : nullptr, threads,
-            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &a->cancel, &failed);
+            [a](size_t d, size_t t) { a->prog_done = d; a->prog_total = t; }, &bad, &a->cancel, &failed, strip);
     }
     { std::lock_guard<std::mutex> lk(a->mtx);
       a->status = a->cancel ? "Cancelled." :
@@ -248,7 +272,8 @@ void do_open_entry(App* a, uint32_t vidx) {
       if (vidx >= a->ventries.size()) { a->running = false; return; }
       kind = a->okind; apath = a->opened_path;
       name = a->ventries[vidx].name;
-      sel.push_back((int)a->ventries[vidx].idx); }
+      sel.push_back((int)a->ventries[vidx].idx);
+      a->status = "Opening " + name + "..."; }
 
     fs::path temp = fs::temp_directory_path() / "SAT-ZIP" / fs::path(apath).stem();
     std::error_code ec;
@@ -267,21 +292,13 @@ void do_open_entry(App* a, uint32_t vidx) {
 
     fs::path file = temp / fs::path(name).lexically_normal();
     bool ok = !bad && fs::exists(file, ec);
-    if (ok) {
-#ifdef _WIN32
-        ShellExecuteW(nullptr, L"open", file.wstring().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-#elif defined(__APPLE__)
-        std::string c = "open \"" + file.string() + "\""; (void)system(c.c_str());
-#else
-        std::string c = "xdg-open \"" + file.string() + "\" >/dev/null 2>&1 &"; (void)system(c.c_str());
-#endif
-    }
+    if (ok) open_file(file);
     { std::lock_guard<std::mutex> lk(a->mtx);
       a->status = ok ? ("Opened " + name + " (temporary copy)") : ("Could not open " + name); }
     a->running = false;
 }
 
-void do_edit(App* a, std::vector<std::string> add_paths, bool remove_selected) {
+void do_edit(App* a, std::vector<std::string> add_paths, std::vector<uint32_t> remove_entries) {
     a->running = true;
     AKind kind; std::string apath; int level, threads, cmode; bool call;
     std::vector<char> removed;
@@ -290,9 +307,8 @@ void do_edit(App* a, std::vector<std::string> add_paths, bool remove_selected) {
       level = a->settings.level; threads = a->settings.threads;
       call = a->settings.compress_all; cmode = a->settings.mode;
       removed.assign(a->opened.count ? a->opened.count : a->ventries.size(), 0);
-      if (remove_selected)
-          for (size_t i = 0; i < a->ventries.size(); ++i)
-              if (a->selected[i]) removed[a->ventries[i].idx] = 1; }
+      for (uint32_t i : remove_entries)
+          if (i < a->ventries.size() && a->ventries[i].idx < removed.size()) removed[a->ventries[i].idx] = 1; }
     int accel = 10 - level; if (accel < 1) accel = 1;
 
     std::vector<sz::Item> newitems;

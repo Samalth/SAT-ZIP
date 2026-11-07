@@ -157,7 +157,7 @@ inline int tar_extract(const uint8_t* buf, size_t n, const std::vector<TarEntry>
                        const fs::path& dest, const std::vector<int>* sel,
                        const Progress& progress = {}, int* failures = nullptr,
                        const std::atomic<bool>* cancel = nullptr,
-                       std::vector<std::string>* failed_names = nullptr) {
+                       std::vector<std::string>* failed_names = nullptr, const std::string& strip = {}) {
     std::vector<uint32_t> idx;
     if (sel) { for (int s : *sel) idx.push_back((uint32_t)s); }
     else     { for (uint32_t i = 0; i < entries.size(); ++i) idx.push_back(i); }
@@ -171,7 +171,7 @@ inline int tar_extract(const uint8_t* buf, size_t n, const std::vector<TarEntry>
         if (i >= entries.size()) { ++bad; continue; }
         const TarEntry& e = entries[i];
         bool ok = false;
-        fs::path rel = fs::path(e.name).lexically_normal();
+        fs::path rel = entry_rel(e.name, strip);
         if (safe_rel(rel) && e.offset + e.size <= n) {
             fs::path dst = dest / rel;
             if (e.is_dir) { fs::create_directories(dst, ec); dir_times.push_back({ dst, e.mtime }); ok = true; }

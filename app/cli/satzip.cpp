@@ -150,7 +150,7 @@ static int cmd_list(const char* archive) {
 }
 
 static int cmd_add_auto(const char* path) {
-    std::string arc = std::string(path) + ".satz";
+    std::string arc = default_archive_path(path, ".satz").string();
     char* p[1] = { const_cast<char*>(path) };
     return cmd_add(arc.c_str(), 1, p);
 }
@@ -189,7 +189,7 @@ static int win_register(bool install) {
         reg_put(HKEY_CURRENT_USER, C + PROGID + L"\\shell\\satzip_to\\command", nullptr, gui + L" --xto \"%1\"");
         reg_put(HKEY_CURRENT_USER, C + PROGID + L"\\shell\\satzip_view", nullptr, L"Open in SAT-ZIP");
         reg_put(HKEY_CURRENT_USER, C + PROGID + L"\\shell\\satzip_view", L"Icon", exe + L",0");
-        reg_put(HKEY_CURRENT_USER, C + PROGID + L"\\shell\\satzip_view\\command", nullptr, gui + L" \"%1\"");
+        reg_put(HKEY_CURRENT_USER, C + PROGID + L"\\shell\\satzip_view\\command", nullptr, gui + L" --open \"%1\"");
         const wchar_t* bases[] = { L"*", L"Directory" };
         for (auto base : bases) {
             RegDeleteTreeW(HKEY_CURRENT_USER, (C + base + L"\\shell\\SATZIP.Add").c_str());
@@ -198,6 +198,10 @@ static int win_register(bool install) {
             reg_put(HKEY_CURRENT_USER, kb, L"MUIVerb", L"SAT-ZIP");
             reg_put(HKEY_CURRENT_USER, kb, L"Icon", exe + L",0");
             reg_put(HKEY_CURRENT_USER, kb, L"SubCommands", L"");
+            if (std::wstring(base) == L"*") {
+                reg_put(HKEY_CURRENT_USER, kb + L"\\shell\\005open", L"MUIVerb", L"Open archive");
+                reg_put(HKEY_CURRENT_USER, kb + L"\\shell\\005open\\command", nullptr, gui + L" --open \"%1\"");
+            }
             reg_put(HKEY_CURRENT_USER, kb + L"\\shell\\010add", L"MUIVerb", L"Add to archive");
             reg_put(HKEY_CURRENT_USER, kb + L"\\shell\\010add\\command", nullptr, gui + L" \"%1\"");
             reg_put(HKEY_CURRENT_USER, kb + L"\\shell\\020zip", L"MUIVerb", L"Zip now");
@@ -213,8 +217,8 @@ static int win_register(bool install) {
             reg_put(HKEY_CURRENT_USER, zk, L"MUIVerb", L"SAT-ZIP");
             reg_put(HKEY_CURRENT_USER, zk, L"Icon", exe + L",0");
             reg_put(HKEY_CURRENT_USER, zk, L"SubCommands", L"");
-            reg_put(HKEY_CURRENT_USER, zk + L"\\shell\\005open", L"MUIVerb", L"Open in SAT-ZIP");
-            reg_put(HKEY_CURRENT_USER, zk + L"\\shell\\005open\\command", nullptr, gui + L" \"%1\"");
+            reg_put(HKEY_CURRENT_USER, zk + L"\\shell\\005open", L"MUIVerb", L"Open archive");
+            reg_put(HKEY_CURRENT_USER, zk + L"\\shell\\005open\\command", nullptr, gui + L" --open \"%1\"");
             reg_put(HKEY_CURRENT_USER, zk + L"\\shell\\010xhere", L"MUIVerb", L"Extract Here");
             reg_put(HKEY_CURRENT_USER, zk + L"\\shell\\010xhere\\command", nullptr, gui + L" --xhere \"%1\"");
             reg_put(HKEY_CURRENT_USER, zk + L"\\shell\\020xto", L"MUIVerb", L"Extract to folder");

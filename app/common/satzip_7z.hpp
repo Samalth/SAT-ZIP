@@ -10,7 +10,7 @@
 
 namespace sz {
 
-struct SevenZEntry { std::string name; bool is_dir; uint64_t orig; uint32_t idx; };
+struct SevenZEntry { std::string name; bool is_dir; uint64_t orig; uint32_t idx; int64_t mtime; };
 
 inline bool is_7z_file(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
@@ -70,8 +70,21 @@ struct Reader {
         auto n = fs::file_size(p, ec);
         if (ec) return false;
         buf = read_file(p, (size_t)n, 0);
+        static const uint8_t sig[6] = { 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C };
+        size_t off = 0;
+        while (off + 32 <= buf.size()) {
+            const void* hit = memchr(buf.data() + off, sig[0], buf.size() - off);
+            if (!hit) break;
+            off = (size_t)((const uint8_t*)hit - buf.data());
+            if (off + 32 > buf.size()) break;
+            if (memcmp(buf.data() + off, sig, 6) == 0 && open_at(off)) return true;
+            ++off;
+        }
+        return false;
+    }
+    bool open_at(size_t off) {
         ms.vt.Read = mem_read; ms.vt.Seek = mem_seek;
-        ms.data = buf.data(); ms.size = buf.size(); ms.pos = 0;
+        ms.data = buf.data() + off; ms.size = buf.size() - off; ms.pos = 0;
         LookToRead2_CreateVTable(&look, False);
         lookbuf.resize(1u << 18);
         look.buf = lookbuf.data(); look.bufSize = lookbuf.size();
@@ -79,6 +92,7 @@ struct Reader {
         LookToRead2_Init(&look);
         SzArEx_Init(&db);
         ok = SzArEx_Open(&db, &look.vt, &alloc(), &alloc()) == SZ_OK;
+        if (!ok) SzArEx_Free(&db, &alloc());
         return ok;
     }
     std::string name(uint32_t i) {
@@ -99,6 +113,11 @@ struct Reader {
         }
         return out;
     }
+    int64_t mtime(uint32_t i) const {
+        if (!SzBitWithVals_Check(&db.MTime, i)) return SZ_AR_NO_MTIME;
+        const CNtfsFileTime& ft = db.MTime.Vals[i];
+        return ((int64_t)(((uint64_t)ft.High << 32) | ft.Low) - 116444736000000000LL) * 100;
+    }
     ~Reader() { if (ok) SzArEx_Free(&db, &alloc()); }
 };
 
@@ -111,14 +130,14 @@ inline bool sevenz_list(const fs::path& p, std::vector<SevenZEntry>& out) {
     out.reserve(r.db.NumFiles);
     for (UInt32 i = 0; i < r.db.NumFiles; ++i)
         out.push_back({ r.name(i), SzArEx_IsDir(&r.db, i) != 0,
-                        (uint64_t)SzArEx_GetFileSize(&r.db, i), (uint32_t)i });
+                        (uint64_t)SzArEx_GetFileSize(&r.db, i), (uint32_t)i, r.mtime(i) });
     return true;
 }
 
 inline int sevenz_extract(const fs::path& p, const fs::path& dest, const std::vector<int>* sel,
                           const Progress& progress = {}, int* failures = nullptr,
                           const std::atomic<bool>* cancel = nullptr,
-                          std::vector<std::string>* failed_names = nullptr) {
+                          std::vector<std::string>* failed_names = nullptr, const std::string& strip = {}) {
     sevenz::Reader r;
     if (!r.open(p)) { if (failures) *failures = 1; return 0; }
 
@@ -126,11 +145,6 @@ inline int sevenz_extract(const fs::path& p, const fs::path& dest, const std::ve
     if (sel) { for (int s : *sel) idx.push_back((uint32_t)s); }
     else     { for (UInt32 i = 0; i < r.db.NumFiles; ++i) idx.push_back(i); }
 
-    auto mtime_of = [&r](uint32_t i) -> int64_t {
-        if (!SzBitWithVals_Check(&r.db.MTime, i)) return SZ_AR_NO_MTIME;
-        const CNtfsFileTime& ft = r.db.MTime.Vals[i];
-        return ((int64_t)(((uint64_t)ft.High << 32) | ft.Low) - 116444736000000000LL) * 100;
-    };
     std::vector<std::pair<fs::path, int64_t>> dir_times;
     UInt32 blockIndex = 0xFFFFFFFF;
     Byte*  outBuffer = NULL;
@@ -142,20 +156,20 @@ inline int sevenz_extract(const fs::path& p, const fs::path& dest, const std::ve
     for (uint32_t i : idx) {
         if (cancel && *cancel) break;
         std::string nm = r.name(i);
-        fs::path rel = fs::path(nm).lexically_normal();
+        fs::path rel = entry_rel(nm, strip);
         bool this_ok = true;
         if (safe_rel(rel)) {
             fs::path dst = dest / rel;
             if (SzArEx_IsDir(&r.db, i)) {
                 fs::create_directories(dst, ec);
-                dir_times.push_back({ dst, mtime_of(i) });
+                dir_times.push_back({ dst, r.mtime(i) });
             } else {
                 size_t offset = 0, outSize = 0;
                 SRes res = SzArEx_Extract(&r.db, &r.look.vt, i, &blockIndex,
                                           &outBuffer, &outBufferSize, &offset, &outSize,
                                           &sevenz::alloc(), &sevenz::alloc());
                 fs::create_directories(dst.parent_path(), ec);
-                if (res == SZ_OK && write_file(dst, outBuffer + offset, outSize)) { restore_mtime(dst, mtime_of(i)); ++files; }
+                if (res == SZ_OK && write_file(dst, outBuffer + offset, outSize)) { restore_mtime(dst, r.mtime(i)); ++files; }
                 else this_ok = false;
             }
         } else this_ok = false;

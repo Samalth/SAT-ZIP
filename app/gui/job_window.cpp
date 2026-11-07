@@ -32,7 +32,7 @@ namespace fs = std::filesystem;
 
 namespace szgui {
 
-static void run_job_window(HeadlessJob& j, const std::string& name, bool close_when_done,
+static void run_job_window(HeadlessJob& j, const std::string& name, bool close_when_done, bool extract_here,
                            const std::function<void()>& work) {
     std::thread worker(work);
     sz::Settings cfg; sz::load_settings(cfg);
@@ -58,6 +58,7 @@ static void run_job_window(HeadlessJob& j, const std::string& name, bool close_w
     want_glyphs(name);
 
     bool grown = false, open_dest = false;
+    double finished_at = -1.0;
     while (true) {
         glfwWaitEventsTimeout(1.0 / 30.0);
         bool finished = j.finished;
@@ -67,6 +68,14 @@ static void run_job_window(HeadlessJob& j, const std::string& name, bool close_w
             glfwSetWindowShouldClose(win, GLFW_FALSE);
         }
         if (finished && close_when_done && j.packed) break;
+        int closes_in = -1;
+        if (finished) {
+            if (finished_at < 0.0) finished_at = glfwGetTime();
+            if (extract_here && j.error.empty() && j.bad == 0) {
+                closes_in = 20 - (int)(glfwGetTime() - finished_at);
+                if (closes_in <= 0) break;
+            }
+        }
         if (finished && !grown && !j.failed.empty()) {
             glfwSetWindowSize(win, ww, wh + (int)(150 * dpi));
             grown = true;
@@ -107,7 +116,7 @@ static void run_job_window(HeadlessJob& j, const std::string& name, bool close_w
             detail = std::to_string(j.files) + " file(s) extracted to:\n" + j.dest.u8string();
             if (j.bad && !cancelled)
                 detail += "\n" + std::to_string(j.bad) + " item(s) could not be extracted (folder access, a name collision, or path length?).";
-            offer_open = j.files > 0;
+            offer_open = j.files > 0 && !extract_here;
         }
         want_glyphs(detail);
 
@@ -148,6 +157,11 @@ static void run_job_window(HeadlessJob& j, const std::string& name, bool close_w
             if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape)) j.cancel = true;
             if (j.cancel) ImGui::EndDisabled();
         } else {
+            if (closes_in > 0) {
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("Closes in %d s", closes_in);
+                ImGui::SameLine();
+            }
             const char* open_label = j.create ? "Show in folder" : "Open folder";
             float w = ImGui::CalcTextSize("Close").x + st.FramePadding.x * 2.0f;
             if (offer_open) w += ImGui::CalcTextSize(open_label).x + st.FramePadding.x * 2.0f + st.ItemSpacing.x;
@@ -174,14 +188,14 @@ static void run_job_window(HeadlessJob& j, const std::string& name, bool close_w
 int run_headless_zip(const char* path, bool mail) {
     HeadlessJob j;
     j.create = true;
-    run_job_window(j, fs::path(path).filename().u8string(), mail, [&] { headless_zip_job(path, j); });
+    run_job_window(j, fs::path(path).filename().u8string(), mail, false, [&] { headless_zip_job(path, j); });
     if (j.packed && mail) sz::mail_with_attachment(j.dest);
     return j.packed ? 0 : 1;
 }
 
 int run_headless_extract(const char* archive, bool subfolder) {
     HeadlessJob j;
-    run_job_window(j, fs::path(archive).filename().u8string(), false,
+    run_job_window(j, fs::path(archive).filename().u8string(), false, !subfolder,
                    [&] { headless_extract_job(archive, subfolder, j); });
     return (j.bad || !j.error.empty()) ? 1 : 0;
 }

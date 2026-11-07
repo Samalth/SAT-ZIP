@@ -5,6 +5,7 @@
 #include "satzip_bench.h"
 #include "satzip_obelisk.hpp"
 #include "satzip_settings.hpp"
+#include "archive_tree.hpp"
 
 #include <atomic>
 #include <mutex>
@@ -25,7 +26,6 @@ struct Series { std::vector<float> x, y; void clear() { x.clear(); y.clear(); } 
 struct CodecView { const char* name = ""; Series comp, decomp; sz_bench_result result{}; bool done = false; };
 
 enum class AKind { Satz, Zip, SevenZ, Tar };
-struct ViewEntry { std::string name; bool is_dir; uint64_t orig, stored; uint32_t idx; };
 
 struct App {
     GLFWwindow* win = nullptr;
@@ -40,17 +40,16 @@ struct App {
     std::string suggest_name;
     sz::Archive opened;
     AKind okind = AKind::Satz;
+    bool opened_readonly = false;
     std::string opened_path;
     std::vector<uint8_t> tarbuf;
     std::vector<sz::TarEntry> tentries;
     std::vector<ViewEntry> ventries;
-    std::vector<char> selected;
-    std::vector<uint32_t> view_order;
+    uint64_t ventries_rev = 0;
+    ArchiveTree tree;
     std::atomic<bool> cancel{false};
     std::atomic<bool> share_pending{false};
     std::string share_path;
-    char search[256] = {0};
-    std::string filter_applied = "\x01";
     fs::path obelisk = sz::find_obelisk();
     bool obelisk_after = false;
     bool mail_after = false;

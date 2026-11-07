@@ -45,7 +45,7 @@ void load_fonts() {
     ImGuiIO& io = ImGui::GetIO();
     static ImVector<ImWchar> ranges;
     static const ImWchar base_ranges[] = { 0x0020, 0x024F, 0x0370, 0x052F, 0x2000, 0x206F, 0 };
-    static const ImWchar icon_range[] = { 0xE700, 0xE900, 0 };
+    static const ImWchar icon_range[] = { 0xE700, 0xE900, 0xF12B, 0xF12B, 0 };
     static const char* fallbacks[] = { "msyh.ttc", "malgun.ttf", "LeelawUI.ttf", "Nirmala.ttc", "seguisym.ttf", "seguiemj.ttf" };
     ImFontGlyphRangesBuilder rb;
     rb.AddRanges(base_ranges);

@@ -9,11 +9,14 @@
 namespace sz {
 
 inline bool is_tar_or_xz(const fs::path& p) {
-    bool xz = false;
 #if defined(SATZIP_HAVE_7Z)
-    xz = is_xz_file(p);
+    if (is_xz_file(p)) return true;
 #endif
-    return xz || p.extension() == ".tar";
+    if (p.extension() == ".tar") return true;
+    std::ifstream f(p, std::ios::binary);
+    uint8_t h[512] = {0};
+    f.read(reinterpret_cast<char*>(h), sizeof(h));
+    return f.gcount() == 512 && is_tar_data(h, 512);
 }
 
 inline bool load_tar_bytes(const fs::path& p, std::vector<uint8_t>& tb) {
@@ -26,6 +29,14 @@ inline bool load_tar_bytes(const fs::path& p, std::vector<uint8_t>& tb) {
 #endif
     tb = std::move(raw);
     return true;
+}
+
+inline fs::path default_archive_path(const fs::path& src, const std::string& ext) {
+    fs::path p = src.lexically_normal();
+    if (!p.has_filename()) p = p.parent_path();
+    std::error_code ec;
+    fs::path name = fs::is_directory(p, ec) ? p.filename() : p.stem();
+    return p.parent_path() / (name.u8string() + ext);
 }
 
 inline fs::path default_extract_dir(const fs::path& archive, bool subfolder) {
@@ -67,11 +78,25 @@ inline ExtractResult extract_any(const fs::path& ap, const fs::path& dest, const
         return r;
     }
     Archive a;
-    if (!open_archive(ap, a)) {
-        r.error = "Not a SAT-ZIP archive.";
+    if (open_archive(ap, a)) {
+        r.files = extract(a, dest, nullptr, 0, progress, &r.bad, cancel, &r.failed);
         return r;
     }
-    r.files = extract(a, dest, nullptr, 0, progress, &r.bad, cancel, &r.failed);
+#if defined(SATZIP_HAVE_ZIP)
+    std::vector<ZipEntry> zes;
+    if (zip_list(ap, zes)) {
+        r.files = zip_extract(ap, dest, nullptr, 0, progress, &r.bad, cancel, &r.failed);
+        return r;
+    }
+#endif
+#if defined(SATZIP_HAVE_7Z)
+    std::vector<SevenZEntry> ses;
+    if (sevenz_list(ap, ses)) {
+        r.files = sevenz_extract(ap, dest, nullptr, progress, &r.bad, cancel, &r.failed);
+        return r;
+    }
+#endif
+    r.error = "Not a supported archive.";
     return r;
 }
 

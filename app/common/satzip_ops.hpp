@@ -256,6 +256,12 @@ inline bool open_archive(const fs::path& p, Archive& a) {
     std::error_code ec;
     auto sz = fs::file_size(p, ec);
     if (ec) return false;
+    {
+        std::ifstream f(p, std::ios::binary);
+        char m[4] = {0};
+        f.read(m, 4);
+        if (f.gcount() != 4 || memcmp(m, "SZAR", 4) != 0) return false;
+    }
     a.close();
     a.buf = read_file(p, sz, 0);
     if (sz_ar_open(a.buf.data(), a.buf.size(), &a.entries, &a.count) != 0) {
@@ -279,10 +285,16 @@ inline bool safe_rel(const fs::path& rel) {
     return true;
 }
 
+inline fs::path entry_rel(const std::string& name, const std::string& strip) {
+    if (!strip.empty() && name.compare(0, strip.size(), strip) == 0)
+        return fs::path(name.substr(strip.size())).lexically_normal();
+    return fs::path(name).lexically_normal();
+}
+
 inline int extract(const Archive& a, const fs::path& destdir, const std::vector<int>* sel,
                    int nthreads, const Progress& progress = {}, int* failures = nullptr,
                    const std::atomic<bool>* cancel = nullptr,
-                   std::vector<std::string>* failed_names = nullptr) {
+                   std::vector<std::string>* failed_names = nullptr, const std::string& strip = {}) {
     std::vector<uint32_t> idx;
     if (sel) { idx.reserve(sel->size()); for (int s : *sel) idx.push_back((uint32_t)s); }
     else     { idx.reserve(a.count);     for (uint32_t i = 0; i < a.count; ++i) idx.push_back(i); }
@@ -300,7 +312,7 @@ inline int extract(const Archive& a, const fs::path& destdir, const std::vector<
     parallel_for(total, nthreads, [&](size_t k) {
         const sz_ar_entry& e = a.entries[idx[k]];
         std::error_code ec;
-        fs::path rel = fs::path(e.name).lexically_normal();
+        fs::path rel = entry_rel(e.name, strip);
         if (safe_rel(rel)) {
             fs::path dst = destdir / rel;
             if (e.is_dir) {
@@ -320,7 +332,7 @@ inline int extract(const Archive& a, const fs::path& destdir, const std::vector<
 
     for (uint32_t i : idx) {
         const sz_ar_entry& e = a.entries[i];
-        fs::path rel = fs::path(e.name).lexically_normal();
+        fs::path rel = entry_rel(e.name, strip);
         if (e.is_dir && safe_rel(rel)) restore_mtime(destdir / rel, e.mtime);
     }
     if (failures) *failures = bad.load();

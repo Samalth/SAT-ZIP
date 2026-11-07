@@ -36,7 +36,7 @@ void headless_zip_job(const char* path, HeadlessJob& j) {
     if (cfg.format == 4) fmt_ext = ".tar.xz";
 #endif
 
-    j.dest = std::string(path) + fmt_ext;
+    j.dest = sz::default_archive_path(src, fmt_ext);
     std::error_code ec;
     if (cfg.zipnow_folder && fs::is_regular_file(src, ec)) {
         std::string stem = src.stem().string();

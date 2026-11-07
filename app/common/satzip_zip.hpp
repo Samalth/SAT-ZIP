@@ -7,7 +7,7 @@
 
 namespace sz {
 
-struct ZipEntry { std::string name; bool is_dir; uint64_t orig, stored; uint32_t idx; };
+struct ZipEntry { std::string name; bool is_dir; uint64_t orig, stored; uint32_t idx; int64_t mtime; };
 
 inline std::string zip_name(const mz_zip_archive_file_stat& st) {
     return legacy_to_utf8(st.m_filename, !(st.m_bit_flag & 0x800));
@@ -20,14 +20,36 @@ inline bool is_zip_file(const fs::path& p) {
     return f.gcount() == 4 && m[0] == 'P' && m[1] == 'K' && (m[2] == 3 || m[2] == 5 || m[2] == 7);
 }
 
-inline bool zip_list(const fs::path& p, std::vector<ZipEntry>& out) {
-    std::error_code ec;
-    auto n = fs::file_size(p, ec);
-    if (ec) return false;
-    auto buf = read_file(p, (size_t)n, 0);
-    mz_zip_archive za;
+inline uint64_t zip_data_start(const fs::path& path, uint64_t n) {
+    if (n < 22) return 0;
+    uint64_t tail = n > 65557 ? n - 65557 : 0;
+    std::vector<uint8_t> p((size_t)(n - tail));
+    std::ifstream f(path, std::ios::binary);
+    f.seekg((std::streamoff)tail);
+    if (!f.read((char*)p.data(), (std::streamsize)p.size())) return 0;
+    for (size_t i = p.size() - 22 + 1; i-- > 0;) {
+        if (p[i] != 'P' || p[i + 1] != 'K' || p[i + 2] != 5 || p[i + 3] != 6) continue;
+        uint32_t cd_size = (uint32_t)p[i + 12] | ((uint32_t)p[i + 13] << 8) | ((uint32_t)p[i + 14] << 16) | ((uint32_t)p[i + 15] << 24);
+        uint32_t cd_off  = (uint32_t)p[i + 16] | ((uint32_t)p[i + 17] << 8) | ((uint32_t)p[i + 18] << 16) | ((uint32_t)p[i + 19] << 24);
+        if (cd_size == 0xFFFFFFFFu || cd_off == 0xFFFFFFFFu) return 0;
+        uint64_t eocd = tail + i, end = (uint64_t)cd_off + cd_size;
+        return end < eocd ? eocd - end : 0;
+    }
+    return 0;
+}
+
+inline bool zip_open(mz_zip_archive& za, const fs::path& p) {
     memset(&za, 0, sizeof(za));
-    if (!mz_zip_reader_init_mem(&za, buf.data(), buf.size(), 0)) return false;
+    std::error_code ec;
+    uint64_t n = fs::file_size(p, ec);
+    if (ec) return false;
+    uint64_t base = zip_data_start(p, n);
+    return mz_zip_reader_init_file_v2(&za, p.u8string().c_str(), 0, base, n - base) != 0;
+}
+
+inline bool zip_list(const fs::path& p, std::vector<ZipEntry>& out) {
+    mz_zip_archive za;
+    if (!zip_open(za, p)) return false;
     mz_uint cnt = mz_zip_reader_get_num_files(&za);
     out.clear();
     out.reserve(cnt);
@@ -37,7 +59,8 @@ inline bool zip_list(const fs::path& p, std::vector<ZipEntry>& out) {
         bool dir = mz_zip_reader_is_file_a_directory(&za, i) != 0;
         std::string name = zip_name(st);
         if (dir && !name.empty() && name.back() == '/') name.pop_back();
-        out.push_back({ name, dir, (uint64_t)st.m_uncomp_size, (uint64_t)st.m_comp_size, (uint32_t)i });
+        out.push_back({ name, dir, (uint64_t)st.m_uncomp_size, (uint64_t)st.m_comp_size, (uint32_t)i,
+                        (int64_t)st.m_time * 1000000000 });
     }
     mz_zip_reader_end(&za);
     return true;
@@ -123,70 +146,66 @@ inline size_t build_zip(const std::vector<Item>& items, std::vector<uint8_t>& ou
 inline int zip_extract(const fs::path& p, const fs::path& dest, const std::vector<int>* sel,
                        int nthreads = 0, const Progress& progress = {}, int* failures = nullptr,
                        const std::atomic<bool>* cancel = nullptr,
-                       std::vector<std::string>* failed_names = nullptr) {
-    std::error_code ec0;
-    auto n = fs::file_size(p, ec0);
-    if (ec0) { if (failures) *failures = 1; return 0; }
-    auto buf = read_file(p, (size_t)n, 0);
-
+                       std::vector<std::string>* failed_names = nullptr, const std::string& strip = {}) {
     std::vector<uint32_t> idx;
     {
         mz_zip_archive za;
-        memset(&za, 0, sizeof(za));
-        if (!mz_zip_reader_init_mem(&za, buf.data(), buf.size(), 0)) { if (failures) *failures = 1; return 0; }
+        if (!zip_open(za, p)) { if (failures) *failures = 1; return 0; }
         if (sel) { for (int s : *sel) idx.push_back((uint32_t)s); }
         else     { mz_uint c = mz_zip_reader_get_num_files(&za); for (mz_uint i = 0; i < c; ++i) idx.push_back(i); }
         mz_zip_reader_end(&za);
     }
 
     std::atomic<int> files{0}, bad{0};
-    std::atomic<size_t> done{0};
+    std::atomic<size_t> done{0}, next{0};
     std::mutex fmtx;
     std::vector<std::pair<fs::path, int64_t>> dir_times;
-    const void* key = buf.data();
-    size_t klen = buf.size();
 
-    parallel_for(idx.size(), nthreads, [&](size_t k) {
-        std::string fname = "entry #" + std::to_string(idx[k]);
-        static thread_local mz_zip_archive tza;
-        static thread_local const void* tkey = nullptr;
-        if (tkey != key) {
-            if (tkey) mz_zip_reader_end(&tza);
-            memset(&tza, 0, sizeof(tza));
-            tkey = mz_zip_reader_init_mem(&tza, key, klen, 0) ? key : nullptr;
-        }
-        std::error_code ec;
-        bool ok = false;
-        if (tkey) {
-            uint32_t i = idx[k];
-            mz_zip_archive_file_stat st;
-            if (mz_zip_reader_file_stat(&tza, i, &st)) {
-                fname = zip_name(st);
-                fs::path rel = fs::path(fname).lexically_normal();
-                if (safe_rel(rel)) {
-                    fs::path dst = dest / rel;
-                    int64_t mt = (int64_t)st.m_time * 1000000000;
-                    if (mz_zip_reader_is_file_a_directory(&tza, i)) {
-                        fs::create_directories(dst, ec);
-                        std::lock_guard<std::mutex> lk(fmtx);
-                        dir_times.push_back({ dst, mt });
-                        ok = true;
-                    } else {
-                        fs::create_directories(dst.parent_path(), ec);
-                        size_t usz = (size_t)st.m_uncomp_size;
-                        std::vector<uint8_t> data(usz);
-                        bool got = usz == 0 || mz_zip_reader_extract_to_mem(&tza, i, data.data(), usz, 0) != 0;
-                        if (got && write_file(dst, data.data(), usz)) { restore_mtime(dst, mt); files.fetch_add(1); ok = true; }
+    auto worker = [&] {
+        mz_zip_archive tza;
+        bool opened = zip_open(tza, p);
+        size_t k;
+        while ((k = next.fetch_add(1)) < idx.size()) {
+            if (cancel && cancel->load(std::memory_order_relaxed)) break;
+            std::string fname = "entry #" + std::to_string(idx[k]);
+            std::error_code ec;
+            bool ok = false;
+            if (opened) {
+                uint32_t i = idx[k];
+                mz_zip_archive_file_stat st;
+                if (mz_zip_reader_file_stat(&tza, i, &st)) {
+                    fname = zip_name(st);
+                    fs::path rel = entry_rel(fname, strip);
+                    if (safe_rel(rel)) {
+                        fs::path dst = dest / rel;
+                        int64_t mt = (int64_t)st.m_time * 1000000000;
+                        if (mz_zip_reader_is_file_a_directory(&tza, i)) {
+                            fs::create_directories(dst, ec);
+                            std::lock_guard<std::mutex> lk(fmtx);
+                            dir_times.push_back({ dst, mt });
+                            ok = true;
+                        } else {
+                            fs::create_directories(dst.parent_path(), ec);
+                            size_t usz = (size_t)st.m_uncomp_size;
+                            std::vector<uint8_t> data(usz);
+                            bool got = usz == 0 || mz_zip_reader_extract_to_mem(&tza, i, data.data(), usz, 0) != 0;
+                            if (got && write_file(dst, data.data(), usz)) { restore_mtime(dst, mt); files.fetch_add(1); ok = true; }
+                        }
                     }
                 }
             }
+            if (!ok) {
+                bad.fetch_add(1);
+                if (failed_names) { std::lock_guard<std::mutex> lk(fmtx); failed_names->push_back(fname); }
+            }
+            if (progress) progress(done.fetch_add(1) + 1, idx.size());
         }
-        if (!ok) {
-            bad.fetch_add(1);
-            if (failed_names) { std::lock_guard<std::mutex> lk(fmtx); failed_names->push_back(fname); }
-        }
-        if (progress) progress(done.fetch_add(1) + 1, idx.size());
-    }, cancel);
+        if (opened) mz_zip_reader_end(&tza);
+    };
+    std::vector<std::thread> pool;
+    for (int t = 1, nt = clamp_threads(nthreads, idx.size()); t < nt; ++t) pool.emplace_back(worker);
+    worker();
+    for (auto& th : pool) th.join();
 
     for (auto& d : dir_times) restore_mtime(d.first, d.second);
     if (failures) *failures = bad.load();

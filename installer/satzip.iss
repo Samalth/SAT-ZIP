@@ -61,12 +61,14 @@ Root: HKA; Subkey: "Software\Classes\SATZIP.Archive\shell\satzip_to"; ValueType:
 Root: HKA; Subkey: "Software\Classes\SATZIP.Archive\shell\satzip_to\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" --xto ""%1"""; Tasks: assocsatz
 Root: HKA; Subkey: "Software\Classes\SATZIP.Archive\shell\satzip_view"; ValueType: string; ValueName: ""; ValueData: "Open in SAT-ZIP"; Tasks: assocsatz
 Root: HKA; Subkey: "Software\Classes\SATZIP.Archive\shell\satzip_view"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExeGui},0"; Tasks: assocsatz
-Root: HKA; Subkey: "Software\Classes\SATZIP.Archive\shell\satzip_view\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" ""%1"""; Tasks: assocsatz
+Root: HKA; Subkey: "Software\Classes\SATZIP.Archive\shell\satzip_view\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" --open ""%1"""; Tasks: assocsatz
 
-; ---- one cascading "SAT-ZIP" menu on files and folders: [Add to archive, Zip now] ----
+; ---- one cascading "SAT-ZIP" menu on files and folders: [Open archive (files only), Add to archive, Zip now] ----
 Root: HKA; Subkey: "Software\Classes\*\shell\SATZIP"; ValueType: string; ValueName: "MUIVerb"; ValueData: "SAT-ZIP"; Flags: uninsdeletekey; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\*\shell\SATZIP"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExeGui},0"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\*\shell\SATZIP"; ValueType: string; ValueName: "SubCommands"; ValueData: ""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\*\shell\SATZIP\shell\005open"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Open archive"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\*\shell\SATZIP\shell\005open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" --open ""%1"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\*\shell\SATZIP\shell\010add"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Add to archive"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\*\shell\SATZIP\shell\010add\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" ""%1"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\*\shell\SATZIP\shell\020zip"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Zip now"; Tasks: contextmenu
@@ -86,8 +88,8 @@ Root: HKA; Subkey: "Software\Classes\Directory\shell\SATZIP\shell\030zipmail\com
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\SATZIP"; ValueType: string; ValueName: "MUIVerb"; ValueData: "SAT-ZIP"; Flags: uninsdeletekey; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\SATZIP"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExeGui},0"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\SATZIP"; ValueType: string; ValueName: "SubCommands"; ValueData: ""; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\SATZIP\shell\005open"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Open in SAT-ZIP"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\SATZIP\shell\005open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" ""%1"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\SATZIP\shell\005open"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Open archive"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\SATZIP\shell\005open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" --open ""%1"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\SATZIP\shell\010xhere"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Extract Here"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\SATZIP\shell\010xhere\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" --xhere ""%1"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\SATZIP\shell\020xto"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Extract to folder"; Tasks: contextmenu
@@ -96,8 +98,8 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.zip\shell\SATZIP\sh
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\SATZIP"; ValueType: string; ValueName: "MUIVerb"; ValueData: "SAT-ZIP"; Flags: uninsdeletekey; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\SATZIP"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExeGui},0"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\SATZIP"; ValueType: string; ValueName: "SubCommands"; ValueData: ""; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\SATZIP\shell\005open"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Open in SAT-ZIP"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\SATZIP\shell\005open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" ""%1"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\SATZIP\shell\005open"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Open archive"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\SATZIP\shell\005open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" --open ""%1"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\SATZIP\shell\010xhere"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Extract Here"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\SATZIP\shell\010xhere\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" --xhere ""%1"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\SATZIP\shell\020xto"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Extract to folder"; Tasks: contextmenu
@@ -105,8 +107,8 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.7z\shell\SATZIP\she
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tar\shell\SATZIP"; ValueType: string; ValueName: "MUIVerb"; ValueData: "SAT-ZIP"; Flags: uninsdeletekey; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tar\shell\SATZIP"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExeGui},0"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tar\shell\SATZIP"; ValueType: string; ValueName: "SubCommands"; ValueData: ""; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tar\shell\SATZIP\shell\005open"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Open in SAT-ZIP"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tar\shell\SATZIP\shell\005open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" ""%1"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tar\shell\SATZIP\shell\005open"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Open archive"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tar\shell\SATZIP\shell\005open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" --open ""%1"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tar\shell\SATZIP\shell\010xhere"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Extract Here"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tar\shell\SATZIP\shell\010xhere\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" --xhere ""%1"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tar\shell\SATZIP\shell\020xto"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Extract to folder"; Tasks: contextmenu
@@ -114,8 +116,8 @@ Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.tar\shell\SATZIP\sh
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.xz\shell\SATZIP"; ValueType: string; ValueName: "MUIVerb"; ValueData: "SAT-ZIP"; Flags: uninsdeletekey; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.xz\shell\SATZIP"; ValueType: string; ValueName: "Icon"; ValueData: "{app}\{#AppExeGui},0"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.xz\shell\SATZIP"; ValueType: string; ValueName: "SubCommands"; ValueData: ""; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.xz\shell\SATZIP\shell\005open"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Open in SAT-ZIP"; Tasks: contextmenu
-Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.xz\shell\SATZIP\shell\005open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" ""%1"""; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.xz\shell\SATZIP\shell\005open"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Open archive"; Tasks: contextmenu
+Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.xz\shell\SATZIP\shell\005open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" --open ""%1"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.xz\shell\SATZIP\shell\010xhere"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Extract Here"; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.xz\shell\SATZIP\shell\010xhere\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeGui}"" --xhere ""%1"""; Tasks: contextmenu
 Root: HKA; Subkey: "Software\Classes\SystemFileAssociations\.xz\shell\SATZIP\shell\020xto"; ValueType: string; ValueName: "MUIVerb"; ValueData: "Extract to folder"; Tasks: contextmenu

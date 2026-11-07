@@ -22,7 +22,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <exception>
+#include <functional>
+#include <thread>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 
@@ -113,6 +117,99 @@ void open_in_explorer(const fs::path& p) {
 #endif
 }
 
+void open_file(const fs::path& p) {
+#ifdef _WIN32
+    std::thread([w = p.wstring()] {
+        HRESULT co = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        SHELLEXECUTEINFOW sei; ZeroMemory(&sei, sizeof(sei));
+        sei.cbSize = sizeof(sei); sei.fMask = SEE_MASK_FLAG_NO_UI; sei.lpFile = w.c_str(); sei.nShow = SW_SHOWNORMAL;
+        if (!ShellExecuteExW(&sei) && GetLastError() == ERROR_NO_ASSOCIATION) {
+            OPENASINFO oi = { w.c_str(), nullptr, OAIF_ALLOW_REGISTRATION | OAIF_REGISTER_EXT | OAIF_EXEC };
+            SHOpenWithDialog(nullptr, &oi);
+        }
+        if (SUCCEEDED(co)) CoUninitialize();
+    }).detach();
+#elif defined(__APPLE__)
+    std::string c = "open \"" + p.string() + "\""; (void)system(c.c_str());
+#else
+    std::string c = "xdg-open \"" + p.string() + "\" >/dev/null 2>&1 &"; (void)system(c.c_str());
+#endif
+}
+
+#ifdef _WIN32
+class DropSource : public IDropSource {
+    LONG refs_ = 1;
+    DWORD effect_ = DROPEFFECT_NONE;
+    const std::function<void()>& on_drop_;
+public:
+    bool dropped = false;
+    explicit DropSource(const std::function<void()>& on_drop) : on_drop_(on_drop) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
+        if (riid == IID_IUnknown || riid == IID_IDropSource) { *ppv = this; AddRef(); return S_OK; }
+        *ppv = nullptr; return E_NOINTERFACE;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return (ULONG)InterlockedIncrement(&refs_); }
+    ULONG STDMETHODCALLTYPE Release() override { return (ULONG)InterlockedDecrement(&refs_); }
+    HRESULT STDMETHODCALLTYPE QueryContinueDrag(BOOL escape, DWORD keys) override {
+        if (escape || (keys & MK_RBUTTON)) return DRAGDROP_S_CANCEL;
+        if (keys & MK_LBUTTON) return S_OK;
+        POINT pt; GetCursorPos(&pt);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(GetAncestor(WindowFromPoint(pt), GA_ROOT), &pid);
+        if (effect_ == DROPEFFECT_NONE || pid == GetCurrentProcessId()) return DRAGDROP_S_CANCEL;
+        on_drop_();
+        dropped = true;
+        return DRAGDROP_S_DROP;
+    }
+    HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD effect) override { effect_ = effect; return DRAGDROP_S_USEDEFAULTCURSORS; }
+};
+
+bool drag_out(const std::vector<fs::path>& paths, const std::function<void()>& on_drop) {
+    static const bool ole = SUCCEEDED(OleInitialize(nullptr));
+    if (!ole || paths.empty()) return false;
+    size_t chars = 1;
+    for (const auto& p : paths) chars += p.wstring().size() + 1;
+    HGLOBAL h = GlobalAlloc(GHND, sizeof(DROPFILES) + chars * sizeof(wchar_t));
+    if (!h) return false;
+    DROPFILES* df = (DROPFILES*)GlobalLock(h);
+    df->pFiles = sizeof(DROPFILES);
+    df->fWide = TRUE;
+    wchar_t* w = (wchar_t*)(df + 1);
+    for (const auto& p : paths) { std::wstring s = p.wstring(); memcpy(w, s.c_str(), s.size() * sizeof(wchar_t)); w += s.size() + 1; }
+    GlobalUnlock(h);
+
+    IDataObject* obj = nullptr;
+    if (FAILED(SHCreateDataObject(nullptr, 0, nullptr, nullptr, IID_PPV_ARGS(&obj)))) { GlobalFree(h); return false; }
+    FORMATETC fe = { CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+    STGMEDIUM sm = {}; sm.tymed = TYMED_HGLOBAL; sm.hGlobal = h;
+    if (FAILED(obj->SetData(&fe, &sm, TRUE))) { GlobalFree(h); obj->Release(); return false; }
+
+    IDragSourceHelper* helper = nullptr;
+    IShellItemImageFactory* images = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_DragDropHelper, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&helper))) &&
+        SUCCEEDED(SHCreateItemFromParsingName(paths[0].wstring().c_str(), nullptr, IID_PPV_ARGS(&images)))) {
+        const int px = 96;
+        SHDRAGIMAGE di = {};
+        if (SUCCEEDED(images->GetImage({ px, px }, SIIGBF_ICONONLY, &di.hbmpDragImage))) {
+            di.sizeDragImage = { px, px };
+            di.ptOffset = { px / 2, px - 12 };
+            di.crColorKey = CLR_NONE;
+            if (FAILED(helper->InitializeFromBitmap(&di, obj))) DeleteObject(di.hbmpDragImage);
+        }
+    }
+    if (images) images->Release();
+    if (helper) helper->Release();
+
+    DropSource src(on_drop);
+    DWORD effect = DROPEFFECT_NONE;
+    DoDragDrop(obj, &src, DROPEFFECT_COPY, &effect);
+    obj->Release();
+    return src.dropped;
+}
+#else
+bool drag_out(const std::vector<fs::path>&, const std::function<void()>&) { return false; }
+#endif
+
 #ifdef _WIN32
 static void set_hwnd_icon(HWND hwnd) {
     wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
@@ -147,6 +244,70 @@ static LONG WINAPI crash_filter(EXCEPTION_POINTERS* ep) {
     return EXCEPTION_EXECUTE_HANDLER;
 }
 #endif
+
+std::string file_type_name(const std::string& name, bool is_dir) {
+    size_t dot = name.rfind('.');
+    std::string ext = (is_dir || dot == std::string::npos || dot == 0) ? std::string() : name.substr(dot + 1);
+    for (auto& c : ext) c = (char)tolower((unsigned char)c);
+    static std::unordered_map<std::string, std::string> cache;
+    std::string key = is_dir ? std::string("/") : ext;
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+    std::string type;
+#ifdef _WIN32
+    std::string probe = is_dir ? std::string("folder") : (ext.empty() ? std::string("file") : "file." + ext);
+    int wn = MultiByteToWideChar(CP_UTF8, 0, probe.c_str(), -1, nullptr, 0);
+    std::wstring wprobe((size_t)wn, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, probe.c_str(), -1, &wprobe[0], wn);
+    SHFILEINFOW sfi;
+    ZeroMemory(&sfi, sizeof(sfi));
+    if (SHGetFileInfoW(wprobe.c_str(), is_dir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL, &sfi, sizeof(sfi),
+                       SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES) && sfi.szTypeName[0]) {
+        int un = WideCharToMultiByte(CP_UTF8, 0, sfi.szTypeName, -1, nullptr, 0, nullptr, nullptr);
+        type.assign((size_t)(un > 0 ? un - 1 : 0), '\0');
+        if (un > 1) WideCharToMultiByte(CP_UTF8, 0, sfi.szTypeName, -1, &type[0], un, nullptr, nullptr);
+    }
+#endif
+    if (type.empty()) {
+        if (is_dir) type = "File folder";
+        else if (ext.empty()) type = "File";
+        else {
+            type = ext;
+            for (auto& c : type) c = (char)toupper((unsigned char)c);
+            type += " File";
+        }
+    }
+    cache.emplace(key, type);
+    return type;
+}
+
+std::string format_local_time(int64_t unix_ns) {
+    if (unix_ns == INT64_MIN) return std::string();
+#ifdef _WIN32
+    const int64_t ticks = unix_ns / 100 + 116444736000000000LL;
+    if (ticks < 0) return std::string();
+    FILETIME ft;
+    ft.dwLowDateTime = (DWORD)(uint64_t)ticks;
+    ft.dwHighDateTime = (DWORD)((uint64_t)ticks >> 32);
+    SYSTEMTIME utc, local;
+    if (!FileTimeToSystemTime(&ft, &utc) || !SystemTimeToTzSpecificLocalTime(nullptr, &utc, &local)) return std::string();
+    wchar_t d[64] = {0}, t[64] = {0};
+    GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_SHORTDATE, &local, nullptr, d, 64, nullptr);
+    GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, &local, nullptr, t, 64);
+    std::wstring w = std::wstring(d) + L" " + t;
+    int un = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string out((size_t)(un > 0 ? un - 1 : 0), '\0');
+    if (un > 1) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &out[0], un, nullptr, nullptr);
+    return out;
+#else
+    time_t secs = (time_t)(unix_ns / 1000000000);
+    struct tm lt;
+    if (!localtime_r(&secs, &lt)) return std::string();
+    char buf[64];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &lt);
+    return buf;
+#endif
+}
 
 void install_crash_log() {
 #ifdef _WIN32

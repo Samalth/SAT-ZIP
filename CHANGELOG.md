@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.0
+- New archive viewer: "Open archive" in the right-click menu opens an archive in its own window
+- Browse archives like in Explorer: folders, path bar, Back / Forward / Up
+- Columns for date modified and type; click a column header to sort
+- Select with Ctrl/Shift-click or Ctrl+A, right-click for Open / Extract / Extract to...
+- Drag files out of an archive straight into Explorer
+- Keyboard: Enter opens, Backspace goes up, Alt+Left/Right goes back and forward
+- Extracting items from inside a folder no longer recreates the parent folders
+- The Archive tab uses the same browser
+- Zip and 7z archives inside other files (like self-extracting .exe files) can be opened and extracted (read-only)
+- Archives with a wrong or missing extension are recognized by their content
+- .zip extraction no longer loads the whole archive into memory
+- The Extract Here window closes by itself after 20 seconds when everything went fine
+
+- Fixed: Zip now on `photo.jpg` made `photo.jpg.zip` instead of `photo.zip`
+- Fixed: a folder path ending in `\` created an archive named `.satz` inside that folder
+
 ## 0.7.0
 - New look: changed style colors in dark and light
 - The empty Archive tab is now a drop zone with buttons

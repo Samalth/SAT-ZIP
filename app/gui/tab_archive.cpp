@@ -6,6 +6,7 @@
 
 #include "tabs.hpp"
 #include "archive_ops.hpp"
+#include "archive_browser.hpp"
 #include "fonts.hpp"
 #include "platform.hpp"
 #include "theme.hpp"
@@ -80,6 +81,7 @@ static void draw_drop_zone(App* a) {
 
 void draw_archive_tab(App* a) {
     bool busy = a->running;
+    BrowserAction act;
     if (a->mode == Mode::Empty) {
         if (busy) ImGui::BeginDisabled();
         draw_drop_zone(a);
@@ -100,8 +102,8 @@ void draw_archive_tab(App* a) {
     }
     ImGui::SameLine();
     if (ImGui::Button("Clear")) { std::lock_guard<std::mutex> lk(a->mtx);
-        a->staged.clear(); a->suggest_name.clear(); a->opened.close(); a->selected.clear();
-        a->ventries.clear(); a->view_order.clear(); a->mode = Mode::Empty;
+        a->staged.clear(); a->suggest_name.clear(); a->opened.close();
+        a->ventries.clear(); ++a->ventries_rev; a->mode = Mode::Empty;
         a->status = "Cleared."; }
     ImGui::SetItemTooltip("Clear the staged items / close the opened archive");
 
@@ -129,32 +131,29 @@ void draw_archive_tab(App* a) {
         ImGui::SetItemTooltip("Compress the staged items into one .satz archive");
     } else if (a->mode == Mode::Viewing) {
         ImGui::SameLine(0, 24);
-        if (ImGui::Button("Extract All...")) {
-            std::string dst; if (dlg_folder(dst)) launch(a, std::thread(do_extract, a, dst, false));
-        }
-        ImGui::SetItemTooltip("Extract every entry to a folder");
-        ImGui::SameLine();
-        if (ImGui::Button("Extract Selected...")) {
-            std::string dst; if (dlg_folder(dst)) launch(a, std::thread(do_extract, a, dst, true));
-        }
-        ImGui::SetItemTooltip("Extract only the checked entries");
-        if (a->okind != AKind::SevenZ && a->okind != AKind::Tar) {
+        draw_extract_buttons(a, act);
+        if (a->okind != AKind::SevenZ && a->okind != AKind::Tar && !a->opened_readonly) {
             wrap_same_line(160);
             if (ImGui::Button("Add to archive...")) ImGui::OpenPopup("editadd");
             ImGui::SetItemTooltip("Add files or a folder to this archive");
             if (ImGui::BeginPopup("editadd")) {
-                if (ImGui::MenuItem("Add files...")) { std::string p; if (dlg_open(p, false)) launch(a, std::thread(do_edit, a, std::vector<std::string>{p}, false)); }
-                if (ImGui::MenuItem("Add folder...")) { std::string p; if (dlg_folder(p)) launch(a, std::thread(do_edit, a, std::vector<std::string>{p}, false)); }
+                if (ImGui::MenuItem("Add files...")) { std::string p; if (dlg_open(p, false)) launch(a, std::thread(do_edit, a, std::vector<std::string>{p}, std::vector<uint32_t>{})); }
+                if (ImGui::MenuItem("Add folder...")) { std::string p; if (dlg_folder(p)) launch(a, std::thread(do_edit, a, std::vector<std::string>{p}, std::vector<uint32_t>{})); }
                 ImGui::EndPopup();
             }
             wrap_same_line(150);
-            if (ImGui::Button("Remove selected")) launch(a, std::thread(do_edit, a, std::vector<std::string>{}, true));
-            ImGui::SetItemTooltip("Rebuild the archive without the checked entries");
+            const bool none = tree_selected_count(a->tree) == 0;
+            if (none) ImGui::BeginDisabled();
+            if (ImGui::Button("Remove selected"))
+                launch(a, std::thread(do_edit, a, std::vector<std::string>{}, tree_selected_entries(a->tree)));
+            if (none) ImGui::EndDisabled();
+            ImGui::SetItemTooltip("Rebuild the archive without the selected items");
         }
     }
     if (busy) ImGui::EndDisabled();
 
-    bool editable = a->mode == Mode::Building || (a->okind != AKind::SevenZ && a->okind != AKind::Tar);
+    bool editable = a->mode == Mode::Building ||
+                    (a->okind != AKind::SevenZ && a->okind != AKind::Tar && !a->opened_readonly);
     if (editable) {
     if (busy) ImGui::BeginDisabled();
     const char* levels[] = {"1 (fastest)","2","3","4","5","6","7","8","9 (smallest)"};
@@ -179,6 +178,7 @@ void draw_archive_tab(App* a) {
 
     ImGui::Separator();
 
+    {
     std::lock_guard<std::mutex> lk(a->mtx);
     if (a->mode == Mode::Building) {
         ImGui::Text("New archive - %zu item(s) staged", a->staged.size());
@@ -221,79 +221,10 @@ void draw_archive_tab(App* a) {
             ImGui::EndTable();
         }
     } else if (a->mode == Mode::Viewing) {
-        ImGui::Text("Viewing %s - %zu entries%s", fs::path(a->opened_path).filename().string().c_str(),
-                    a->ventries.size(), a->okind == AKind::Zip ? "  [zip]" :
-                                        a->okind == AKind::SevenZ ? "  [7z]" :
-                                        a->okind == AKind::Tar ? "  [tar]" : "");
-        ImGui::SameLine(0, 24);
-        ImGui::SetNextItemWidth(260);
-        ImGui::InputTextWithHint("##search", "Search in archive...", a->search, sizeof(a->search));
-        want_glyphs(a->search);
-        ImGui::SetItemTooltip("Filter entries by name (case-insensitive). Double-click an entry to open it.");
-        if (ImGui::BeginTable("entries", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                                            ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable | ImGuiTableFlags_ScrollY, ImVec2(0, ImGui::GetContentRegionAvail().y))) {
-            ImGui::TableSetupScrollFreeze(0, 1);
-            ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_NoSort, ImGui::GetFrameHeight());
-            ImGui::TableSetupColumn("name", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 4.0f);
-            ImGui::TableSetupColumn("size", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-            ImGui::TableSetupColumn("stored", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-            ImGui::TableHeadersRow();
-            bool refilter = false;
-            if (a->filter_applied != a->search) {
-                std::string f = a->search;
-                std::string flc = f;
-                for (auto& c : flc) c = (char)tolower((unsigned char)c);
-                a->view_order.clear();
-                for (uint32_t i = 0; i < a->ventries.size(); ++i) {
-                    if (flc.empty()) { a->view_order.push_back(i); continue; }
-                    std::string nlc = a->ventries[i].name;
-                    for (auto& c : nlc) c = (char)tolower((unsigned char)c);
-                    if (nlc.find(flc) != std::string::npos) a->view_order.push_back(i);
-                }
-                a->filter_applied = f;
-                refilter = true;
-            }
-            if (ImGuiTableSortSpecs* ss = ImGui::TableGetSortSpecs()) {
-                if ((ss->SpecsDirty || refilter) && ss->SpecsCount > 0) {
-                    const ImGuiTableColumnSortSpecs& sp = ss->Specs[0];
-                    bool asc = sp.SortDirection != ImGuiSortDirection_Descending;
-                    const std::vector<ViewEntry>& es = a->ventries;
-                    std::stable_sort(a->view_order.begin(), a->view_order.end(), [&](uint32_t x, uint32_t y) {
-                        const ViewEntry& ex = es[x]; const ViewEntry& ey = es[y];
-                        bool lt, gt;
-                        if (sp.ColumnIndex == 2)      { lt = ex.orig   < ey.orig;   gt = ex.orig   > ey.orig; }
-                        else if (sp.ColumnIndex == 3) { lt = ex.stored < ey.stored; gt = ex.stored > ey.stored; }
-                        else { int c = ex.name.compare(ey.name); lt = c < 0; gt = c > 0; }
-                        return asc ? lt : gt;
-                    });
-                    ss->SpecsDirty = false;
-                }
-            }
-            ImGuiListClipper clip;
-            clip.Begin((int)a->view_order.size());
-            while (clip.Step()) {
-                for (int k = clip.DisplayStart; k < clip.DisplayEnd; ++k) {
-                    uint32_t i = a->view_order[(size_t)k];
-                    const ViewEntry& e = a->ventries[i];
-                    ImGui::TableNextRow(); ImGui::TableNextColumn();
-                    if (!e.is_dir) { bool c = a->selected[i] != 0; ImGui::PushID((int)i);
-                        if (ImGui::Checkbox("##s", &c)) a->selected[i] = c ? 1 : 0; ImGui::PopID(); }
-                    ImGui::TableNextColumn();
-                    ImGui::PushID((int)i + 100000);
-                    std::string lbl = e.name + (e.is_dir ? "/" : "");
-                    ImGui::Selectable(lbl.c_str(), false, ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap);
-                    if (!e.is_dir && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0) && !a->running)
-                        launch(a, std::thread(do_open_entry, a, i));
-                    ImGui::PopID();
-                    ImGui::TableNextColumn();
-                    if (e.is_dir) ImGui::TextDisabled("-"); else ImGui::TextUnformatted(fmt_size(e.orig).c_str());
-                    ImGui::TableNextColumn();
-                    if (e.is_dir) ImGui::TextDisabled("-"); else ImGui::TextUnformatted(fmt_size(e.stored).c_str());
-                }
-            }
-            ImGui::EndTable();
-        }
+        draw_archive_browser(a, act);
     }
+    }
+    run_browser_action(a, act);
 }
 
 }
